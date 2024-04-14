@@ -11,7 +11,7 @@ def main():
             result[str[:2]] = i
     print(result)
     return result
-    
+
 if __name__ == "__main__":
     main()
 

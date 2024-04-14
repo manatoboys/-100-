@@ -1,6 +1,6 @@
 def main():
     str = "パタトクカシーー"
-    
+
     extract_str=""
     extract_str += str[0]
     extract_str += str[2]
