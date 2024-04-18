@@ -4,7 +4,6 @@ FILE_PATH = "data/popular-names.txt"
 def write_lines(n: int):
     with open(FILE_PATH) as file:
         lines = file.readlines()
-    
     for i in range(len(lines)-n,len(lines)):
         print(lines[i], end ="")
 
@@ -15,3 +14,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#P.10 明確な単語を選ぶ

@@ -10,3 +10,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+#P.10 明確な単語を選ぶ
