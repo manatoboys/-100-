@@ -167,6 +167,26 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         torch.cuda.empty_cache()
     return epoch_loss/len(dataloader)
 
+def translate(model, text, tgt_itos, src_stoi, tokenizer_src, device):
+    model.eval()
+    model.to(device)
+    text_index = [src_stoi ['<start>']] + [src_stoi [token] if token in src_stoi else src_stoi['<unk>'] for token in tokenizer_src(text)] + [src_stoi ['<end>']]
+    src = torch.tensor(text_index).to(device)
+    tgt = src_stoi["<start>"].to(device)
+    finish_index = src_stoi["<end>"]
+    len_seq = 1
+    while tgt[-1]!=finish_index:
+        len_seq += 1
+        pred = model(src,tgt)
+        tgt = pred[:len_seq]
+    english_index = tgt[1:-1]
+    english_text = "".join([en if en in tgt_itos else src_stoi["<unk>"] for en in english_index])
+    return english_text
+        
+    
+    
+    
+
 
 if __name__ == "__main__":
     PAD_IDX = 1
@@ -177,7 +197,7 @@ if __name__ == "__main__":
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
     tokenizer_tgt = get_tokenizer('spacy', language='en_core_web_sm')
 
-    logger.info("Loading datasets...")
+    logger.info("Preparing...")
     with open(JP_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
         train_jp_list = f.readlines()
         train_jp_list = [jp.strip("\n") for jp in train_jp_list]
@@ -185,63 +205,17 @@ if __name__ == "__main__":
     with open(EN_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
         train_en_list = f.readlines()
         train_en_list = [en.strip("\n") for en in train_en_list]
-    
-    logger.info("Creating dataloader...")
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
-    train_dataloader = dataloader_creater.create_dataloader(jp_list=train_jp_list, en_list=train_en_list, collate_fn=collate_fn)
+    tgt_itos = dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
+    src_stoi = dataloader_creater.vocab_src_stoi
     vocab_size_src = dataloader_creater.vocab_size_src
     vocab_size_tgt = dataloader_creater.vocab_size_tgt
     
-    # モデルのハイパーパラメータ
-    embedding_dim = 512
-    num_heads = 4
-    num_layers = 4
-    lr_rate = 1e-5
-
-    # モデルの初期化
-    logger.info("Initializing model...")
+    text = "私は日本人です。"
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-    model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
-    # if torch.cuda.device_count() > 1:
-    #     print("Let's use", torch.cuda.device_count(), "GPUs!")
-    #     model = nn.DataParallel(model)
-    model.to(device)
-    criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-    optimizer = optim.Adam(model.parameters(), lr=lr_rate)
+    logger.info("Loading model...")
+    model = torch.load("model_weight.pth")
+    logger.info("Translating...")
+    translate(model, text, tgt_itos, src_stoi, tokenizer_src, device)
 
-    # トレーニングループ
-    num_epochs = 10
-    
-    model.train()
-    logger.info("Starting training loop...")
-    for epoch in tqdm(range(num_epochs)):
-        train_loss = train_epoch(model, train_dataloader, criterion, optimizer, device)
-        logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
-
-    logger.info("Saving model...")
-    torch.save(model.state_dict(),'model_weight.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
-    logger.info("Training complete.")
-
-
-
-
-
-
-##output
-# 2024-06-24 13:56:21,384 - INFO - Loading tokenizers...
-# 2024-06-24 13:56:23,513 - INFO - Loading datasets...
-# 2024-06-24 13:56:23,934 - INFO - Creating dataloader...
-# 2024-06-24 14:00:38,814 - INFO - Initializing model...
-# 2024-06-24 14:00:42,593 - INFO - Starting training loop...
-# 2024-06-24 14:45:38,335 - INFO - Epoch 1, Train Loss: 3.9763█████████████████████████████████████████████████| 4449/4449 [44:55<00:00,  1.69it/s]
-# 2024-06-24 15:31:21,670 - INFO - Epoch 2, Train Loss: 1.9072█████████████████████████████████████████████████| 4449/4449 [45:43<00:00,  1.67it/s]
-# 2024-06-24 16:16:15,933 - INFO - Epoch 3, Train Loss: 1.2561█████████████████████████████████████████████████| 4449/4449 [44:54<00:00,  1.60it/s]
-# 2024-06-24 17:00:57,915 - INFO - Epoch 4, Train Loss: 0.8996█████████████████████████████████████████████████| 4449/4449 [44:41<00:00,  1.55it/s]
-# 2024-06-24 17:45:16,442 - INFO - Epoch 5, Train Loss: 0.6767█████████████████████████████████████████████████| 4449/4449 [44:18<00:00,  1.79it/s]  1.76it
-# 2024-06-24 18:29:16,575 - INFO - Epoch 6, Train Loss: 0.5257█████████████████████████████████████████████████| 4449/4449 [43:59<00:00,  1.51it/s]
-# 2024-06-24 19:13:22,668 - INFO - Epoch 7, Train Loss: 0.4175██████████████████████████████████████████████████████████████████| 4449/4449 [44:05<00:00,  1.87it/s]
-# 2024-06-24 19:57:42,225 - INFO - Epoch 8, Train Loss: 0.3373██████████████████████████████████████████████████████████████████| 4449/4449 [44:19<00:00,  1.55it/s]
-# 2024-06-24 20:42:12,486 - INFO - Epoch 9, Train Loss: 0.2763██████████████████████████████████████████████████████████████████| 4449/4449 [44:30<00:00,  1.86it/s]
-# 2024-06-24 21:26:28,399 - INFO - Epoch 10, Train Loss: 0.2289█████████████████████████████████████████████████████████████████| 4449/4449 [44:15<00:00,  1.58it/s]
-# 2024-06-24 21:26:28,400 - INFO - Saving model...
-# 2024-06-24 21:26:29,513 - INFO - Training complete.
+ 
