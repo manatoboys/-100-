@@ -51,7 +51,7 @@ class DataLoaderCreater:
         for text in texts:
             counter.update(tokenizer(text))
         specials = ['<unk>', '<pad>']
-        v = vocab(counter, specials=specials, min_freq=2)   #1回しか出てきていない単語は語彙に入れない
+        v = vocab(counter, specials=specials, min_freq=1)   #1回しか出てきていない単語は語彙に入れない
         v.set_default_index(v['<unk>'])
         return v
 
@@ -60,7 +60,7 @@ class DataLoaderCreater:
         for text in texts:
             counter.update(tokenizer(text))
         specials = ['<unk>', '<pad>', '<bos>', '<eos>']
-        v = vocab(counter, specials=specials, min_freq=2)   #1回しか出てきていない単語は語彙に入れない
+        v = vocab(counter, specials=specials, min_freq=1)   #1回しか出てきていない単語は語彙に入れない
         v.set_default_index(v['<unk>'])
         return v
 
@@ -147,28 +147,29 @@ class TransformerModel(nn.Module):
 
 
 def translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device):
-    model.eval()
-    model.to(device)
-    text_index = [src_stoi[token] if token in src_stoi else src_stoi['<unk>'] for token in tokenizer_src(text)]
-    print(text_index)
-    src = torch.tensor(text_index).unsqueeze(0).to(device)
-    tgt = torch.tensor([tgt_stoi["<bos>"]]).unsqueeze(0).to(device)
-    print(f"src.shape: {src.shape}")
-    print(f"tgt.shape: {tgt.shape}")
-    finish_index = tgt_stoi["<eos>"]
-    for i in range(50):
-        pred=model(src, tgt)
-        print(f"pred:{pred.shape}")
-        next_word = pred.argmax(dim=2)
-        print(f"next_word:{next_word.shape}")
-        print(f"tgt.shape:{tgt.shape}")
-        tgt = torch.cat((tgt, next_word[:,-1].unsqueeze(0)), dim=1)
-        print(f"tgt:{tgt}")
-        english_index = tgt[0,1:]
-        if tgt[0,-1]==finish_index:
-            english_index = english_index[:-1]
-            break
-    english_text = " ".join([tgt_itos[en] for en in english_index])
+    with torch.no_grad():
+        model.eval()
+        model.to(device)
+        text_index = [src_stoi[token] if token in src_stoi else src_stoi['<unk>'] for token in tokenizer_src(text)]
+        # print(text_index)
+        src = torch.tensor(text_index).unsqueeze(0).to(device)
+        tgt = torch.tensor([tgt_stoi["<bos>"]]).unsqueeze(0).to(device)
+        # print(f"src.shape: {src.shape}")
+        # print(f"tgt.shape: {tgt.shape}")
+        finish_index = tgt_stoi["<eos>"]
+        for i in range(50):
+            pred=model(src, tgt)
+            # print(f"pred:{pred.shape}")
+            next_word = pred.argmax(dim=2)
+            # print(f"next_word:{next_word.shape}")
+            # print(f"tgt.shape:{tgt.shape}")
+            tgt = torch.cat((tgt, next_word[:,-1].unsqueeze(0)), dim=1)
+            # print(f"tgt:{tgt}")
+            english_index = tgt[0,1:]
+            if tgt[0,-1]==finish_index:
+                english_index = english_index[:-1]
+                break
+        english_text = " ".join([tgt_itos[en] for en in english_index])
     return english_text
         
     
@@ -180,6 +181,9 @@ if __name__ == "__main__":
     PAD_IDX = 1
     JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
     EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
+
+    JP_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.ja"
+    EN_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.en"
 
     logger.info("Loading tokenizers...")
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
@@ -193,6 +197,15 @@ if __name__ == "__main__":
     with open(EN_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
         train_en_list = f.readlines()
         train_en_list = [en.strip("\n") for en in train_en_list]
+
+    with open(JP_TEST_FILE_PATH, "r", encoding="utf-8")as f:
+        test_jp_list = f.readlines()
+        test_jp_list = [jp.strip("\n") for jp in test_jp_list]
+
+    with open(EN_TEST_FILE_PATH, "r", encoding="utf-8")as f:
+        test_en_list = f.readlines()
+        test_en_list = [en.strip("\n") for en in test_en_list]
+
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
     dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
     tgt_itos = dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
@@ -210,13 +223,16 @@ if __name__ == "__main__":
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
 
 # モデルの状態をロード
-    model.load_state_dict(torch.load('model_weight.pth'))
-    text = "彼の大学は東京にある"
+    model.load_state_dict(torch.load('model_weight_2.pth'))
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logger.info("Loading model...")
     logger.info("Translating...")
-    en_text = translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
-    print(en_text)
+    for jp_text,en_text in zip(train_jp_list[::100], train_en_list[::100]):
+        predicted_text = translate(model, jp_text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
+        print(f"jp_text: {jp_text}")
+        print(f"en_text: {en_text}")
+        print(f"predicted_text: {predicted_text}")
+        print("=============")
     
 
  
