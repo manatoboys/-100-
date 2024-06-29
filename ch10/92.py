@@ -151,18 +151,12 @@ def translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device):
         model.eval()
         model.to(device)
         text_index = [src_stoi[token] if token in src_stoi else src_stoi['<unk>'] for token in tokenizer_src(text)]
-        # print(text_index)
         src = torch.tensor(text_index).unsqueeze(0).to(device)
         tgt = torch.tensor([tgt_stoi["<bos>"]]).unsqueeze(0).to(device)
-        # print(f"src.shape: {src.shape}")
-        # print(f"tgt.shape: {tgt.shape}")
         finish_index = tgt_stoi["<eos>"]
-        for i in range(50):
+        for i in range(100):
             pred=model(src, tgt)
-            # print(f"pred:{pred.shape}")
             next_word = pred.argmax(dim=2)
-            # print(f"next_word:{next_word.shape}")
-            # print(f"tgt.shape:{tgt.shape}")
             tgt = torch.cat((tgt, next_word[:,-1].unsqueeze(0)), dim=1)
             # print(f"tgt:{tgt}")
             english_index = tgt[0,1:]
@@ -223,11 +217,11 @@ if __name__ == "__main__":
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
 
 # モデルの状態をロード
-    model.load_state_dict(torch.load('model_weight_2.pth'))
+    model.load_state_dict(torch.load('model_weight_4.pth'))
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logger.info("Loading model...")
     logger.info("Translating...")
-    for jp_text,en_text in zip(train_jp_list[::100], train_en_list[::100]):
+    for jp_text,en_text in zip(test_jp_list[::100], test_en_list[::100]):
         predicted_text = translate(model, jp_text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
         print(f"jp_text: {jp_text}")
         print(f"en_text: {en_text}")
