@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import logging
+from sacrebleu.metrics import BLEU
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -217,9 +218,23 @@ if __name__ == "__main__":
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logger.info("Loading model...")
     logger.info("Translating...")
-    for jp_text,en_text in zip(test_jp_list[::100], test_en_list[::100]):
+    predicted_list = []
+    for jp_text,en_text in zip(test_jp_list, test_en_list):
         predicted_text = translate(model, jp_text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
-        print(f"jp_text: {jp_text}")
-        print(f"en_text: {en_text}")
-        print(f"predicted_text: {predicted_text}")
-        print("=============")
+        predicted_list.append(predicted_text)
+
+    bleu = BLEU()
+    bleu.corpus_score(predicted_text, test_en_list)
+    print(bleu)
+
+
+'''
+BLEU = 45.07 70.6/42.9/36.4/37.5 (BP = 1.000 ratio = 1.000 hyp_len = 17 ref_len = 17)の意味
+
+BLEU = 45.07: これはBLEUスコアの値で、システム翻訳の全体的な品質を示します。通常、0から100の範囲で評価されます。
+70.6/42.9/36.4/37.5: これは1-gram、2-gram、3-gram、4-gramの精度を示しています。各数値はそれぞれのn-gramがどれだけ参照翻訳と一致しているかを表しています。
+BP = 1.000: これはブレベティペナルティ（Brevity Penalty）で、システム翻訳が参照翻訳より短すぎる場合にスコアを調整します。1.000はペナルティが適用されていないことを示します。
+ratio = 1.000: これはシステム翻訳の長さと参照翻訳の長さの比率です。1.000は長さがほぼ等しいことを示します。
+hyp_len = 17: これはシステム翻訳の総単語数です。
+ref_len = 17: これは参照翻訳の総単語数です。
+'''
