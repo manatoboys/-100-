@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import logging
-from sacrebleu.metrics import BLEU
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -51,7 +50,7 @@ class DataLoaderCreater:
         for text in texts:
             counter.update(tokenizer(text))
         specials = ['<unk>', '<pad>']
-        v = vocab(counter, specials=specials, min_freq=1)   #1回しか出てきていない単語は語彙に入れない
+        v = vocab(counter, specials=specials, min_freq=1)   
         v.set_default_index(v['<unk>'])
         return v
 
@@ -60,7 +59,7 @@ class DataLoaderCreater:
         for text in texts:
             counter.update(tokenizer(text))
         specials = ['<unk>', '<pad>', '<bos>', '<eos>']
-        v = vocab(counter, specials=specials, min_freq=1)   #1回しか出てきていない単語は語彙に入れない
+        v = vocab(counter, specials=specials, min_freq=1)  
         v.set_default_index(v['<unk>'])
         return v
 
@@ -81,14 +80,16 @@ class DataLoaderCreater:
         self.vocab_tgt_stoi = vocab_tgt.get_stoi()
         self.vocab_size_src = len(self.vocab_src_stoi)
         self.vocab_size_tgt = len(self.vocab_tgt_stoi)
-        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
+        
+        #修正箇所　系列庁制限なくした
+        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が100未満のものだけを訓練に使用する
         jp_list = [data[0] for data in jp_en_list]
         en_list = [data[1] for data in jp_en_list]
         src_data = [torch.tensor(self.convert_text_to_indexes_src(jp_data, self.vocab_src_stoi, self.src_tokenizer)) for jp_data in jp_list]
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, self.vocab_tgt_stoi, self.tgt_tokenizer)) for en_data in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=200, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=256, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
@@ -146,26 +147,55 @@ class TransformerModel(nn.Module):
         return output
 
 
-def translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device):
-    with torch.no_grad():
-        model.eval()
-        model.to(device)
-        text_index = [src_stoi[token] if token in src_stoi else src_stoi['<unk>'] for token in tokenizer_src(text)]
-        src = torch.tensor(text_index).unsqueeze(0).to(device)
-        tgt = torch.tensor([tgt_stoi["<bos>"]]).unsqueeze(0).to(device)
-        finish_index = tgt_stoi["<eos>"]
-        for i in range(100):
-            pred=model(src, tgt)
-            next_word = pred.argmax(dim=2)
-            tgt = torch.cat((tgt, next_word[:,-1].unsqueeze(0)), dim=1)
-            # print(f"tgt:{tgt}")
-            english_index = tgt[0,1:]
-            if tgt[0,-1]==finish_index:
-                english_index = english_index[:-1]
-                break
-        english_text = " ".join([tgt_itos[en] for en in english_index])
-    return english_text
 
+def generate_square_subsequent_mask(sz: int, device: torch.device) -> torch.Tensor:
+    mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    return mask
+
+
+def create_pad_mask(input_word, pad_idx=1):
+    pad_mask = input_word == pad_idx
+    return pad_mask.float()
+
+#デコーダ
+#入力は<start> token1 token2 ... <pad>...  (<end>は含めない)
+#ラベルは token1 token2 ... <end> <pad>...  (<start>は含めない)
+
+def train_epoch(model, dataloader, criterion, optimizer, device):
+    epoch_loss = 0
+    for batch_idx, (src, tgt) in enumerate(tqdm(dataloader)):
+        src = src.to(device)
+        tgt = tgt.to(device)
+
+        src_pad_mask = create_pad_mask(src).to(device)
+        
+
+        mask = tgt != 3
+        input_tgt = tgt[mask].view(tgt.size(0), -1) #3は<eos>
+        tgt_pad_mask = create_pad_mask(input_tgt).to(device)
+        tgt_mask =generate_square_subsequent_mask(input_tgt.size(1), device).to(device)
+        targets = tgt[:, 1:]
+        
+        output = model(src, input_tgt, tgt_mask=tgt_mask, src_padding_mask=src_pad_mask, tgt_padding_mask=tgt_pad_mask)
+        target_shape = (-1, output.shape[2]) 
+        output = output.reshape(target_shape)
+        targets = targets.reshape(-1)
+        # output = output.permute(0, 2, 1) #(バッチサイズ、　シークエンス長、　vocab_size) => (バッチサイズ、　vocab_size、　シークエンス長)にする
+        loss = criterion(output, targets)
+        
+        mask = (targets != PAD_IDX).float()
+
+        # マスクを適用してロスを再計算
+        loss = loss * mask
+        loss = loss.sum() / mask.sum()
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+        torch.cuda.empty_cache()
+    return epoch_loss/len(dataloader.dataset)
 
 
 if __name__ == "__main__":
@@ -173,14 +203,11 @@ if __name__ == "__main__":
     JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
     EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
 
-    JP_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.ja"
-    EN_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.en"
-
     logger.info("Loading tokenizers...")
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
     tokenizer_tgt = get_tokenizer('spacy', language='en_core_web_sm')
 
-    logger.info("Preparing...")
+    logger.info("Loading datasets...")
     with open(JP_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
         train_jp_list = f.readlines()
         train_jp_list = [jp.strip("\n") for jp in train_jp_list]
@@ -188,53 +215,40 @@ if __name__ == "__main__":
     with open(EN_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
         train_en_list = f.readlines()
         train_en_list = [en.strip("\n") for en in train_en_list]
-
-    with open(JP_TEST_FILE_PATH, "r", encoding="utf-8")as f:
-        test_jp_list = f.readlines()
-        test_jp_list = [jp.strip("\n") for jp in test_jp_list]
-
-    with open(EN_TEST_FILE_PATH, "r", encoding="utf-8")as f:
-        test_en_list = f.readlines()
-        test_en_list = [en.strip("\n") for en in test_en_list]
-
+    
+    logger.info("Creating dataloader...")
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
-    dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
-    tgt_itos = dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
-    tgt_stoi = dataloader_creater.vocab_tgt_stoi
-    src_stoi = dataloader_creater.vocab_src_stoi
+    train_dataloader = dataloader_creater.create_dataloader(jp_list=train_jp_list, en_list=train_en_list, collate_fn=collate_fn)
     vocab_size_src = dataloader_creater.vocab_size_src
     vocab_size_tgt = dataloader_creater.vocab_size_tgt
-
+    
     # モデルのハイパーパラメータ
     embedding_dim = 512
     num_heads = 4
     num_layers = 4
     lr_rate = 1e-4
 
+    # モデルの初期化
+    logger.info("Initializing model...")
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
+    # if torch.cuda.device_count() > 1:
+    #     print("Let's use", torch.cuda.device_count(), "GPUs!")
+    #     model = nn.DataParallel(model)
+    model.to(device)
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    optimizer = optim.Adam(model.parameters(), lr=lr_rate)
 
-# モデルの状態をロード
-    model.load_state_dict(torch.load('model_weight_4.pth'))
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    logger.info("Loading model...")
-    logger.info("Translating...")
-    predicted_list = []
-    for jp_text,en_text in tqdm(zip(test_jp_list, test_en_list)):
-        predicted_text = translate(model, jp_text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
-        predicted_list.append(predicted_text)
+    # トレーニングループ
+    num_epochs = 10
+    
+    model.train()
+    logger.info("Starting training loop...")
+    for epoch in tqdm(range(num_epochs)):
+        train_loss = train_epoch(model, train_dataloader, criterion, optimizer, device)
+        logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
 
-    bleu = BLEU()
-    score = bleu.corpus_score(predicted_list, [test_en_list])
-    print(f"BLEU Score: {score}")
+    logger.info("Saving model...")
+    torch.save(model.state_dict(),'model_weight_4.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
+    logger.info("Training complete.")
 
-
-'''
-BLEU = 45.07 70.6/42.9/36.4/37.5 (BP = 1.000 ratio = 1.000 hyp_len = 17 ref_len = 17)の意味
-
-BLEU = 45.07: これはBLEUスコアの値で、システム翻訳の全体的な品質を示します。通常、0から100の範囲で評価されます。
-70.6/42.9/36.4/37.5: これは1-gram、2-gram、3-gram、4-gramの精度を示しています。各数値はそれぞれのn-gramがどれだけ参照翻訳と一致しているかを表しています。
-BP = 1.000: これはブレベティペナルティ（Brevity Penalty）で、システム翻訳が参照翻訳より短すぎる場合にスコアを調整します。1.000はペナルティが適用されていないことを示します。
-ratio = 1.000: これはシステム翻訳の長さと参照翻訳の長さの比率です。1.000は長さがほぼ等しいことを示します。
-hyp_len = 17: これはシステム翻訳の総単語数です。
-ref_len = 17: これは参照翻訳の総単語数です。
-'''

@@ -1,3 +1,8 @@
+import copy
+from heapq import heappush, heappop
+
+import torch
+
 import polars as pl
 import torch
 from torchtext.data.utils import get_tokenizer
@@ -10,7 +15,6 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import logging
-from sacrebleu.metrics import BLEU
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -145,28 +149,81 @@ class TransformerModel(nn.Module):
         output = self.fc_out(output)
         return output
 
+class BeamSearchNode(object):
+    def __init__(self, h, prev_node, wid, logp, length):
+        self.h = h
+        self.prev_node = prev_node
+        self.wid = wid
+        self.logp = logp
+        self.length = length
 
-def translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device):
-    with torch.no_grad():
-        model.eval()
-        model.to(device)
-        text_index = [src_stoi[token] if token in src_stoi else src_stoi['<unk>'] for token in tokenizer_src(text)]
-        src = torch.tensor(text_index).unsqueeze(0).to(device)
-        tgt = torch.tensor([tgt_stoi["<bos>"]]).unsqueeze(0).to(device)
-        finish_index = tgt_stoi["<eos>"]
-        for i in range(100):
-            pred=model(src, tgt)
-            next_word = pred.argmax(dim=2)
-            tgt = torch.cat((tgt, next_word[:,-1].unsqueeze(0)), dim=1)
-            # print(f"tgt:{tgt}")
-            english_index = tgt[0,1:]
-            if tgt[0,-1]==finish_index:
-                english_index = english_index[:-1]
+    def eval(self):
+        return self.logp / float(self.length - 1 + 1e-6)
+
+def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, max_dec_steps, device):
+    model.eval()
+    src = src.to(device)
+    memory = model.embedding_src(src)
+    memory = model.pos_encoding(memory)
+    memory = model.transformer.encoder(memory)
+    
+    batch_size = src.size(0)
+    n_best_list = [[] for _ in range(batch_size)]
+
+    for batch_id in range(batch_size):
+        end_nodes = []
+        decoder_input = torch.tensor([[sos_token]]).to(device)
+        node = BeamSearchNode(h=None, prev_node=None, wid=decoder_input, logp=0, length=1)
+        nodes = []
+        heappush(nodes, (-node.eval(), id(node), node))
+        n_dec_steps = 0
+
+        while True:
+            if n_dec_steps > max_dec_steps:
                 break
-        english_text = " ".join([tgt_itos[en] for en in english_index])
-    return english_text
 
+            score, _, n = heappop(nodes)
+            decoder_input = n.wid
 
+            if n.wid.item() == eos_token and n.prev_node is not None:
+                end_nodes.append((score, id(n), n))
+                if len(end_nodes) >= n_best:
+                    break
+                else:
+                    continue
+
+            tgt_emb = model.embedding_tgt(decoder_input)
+            tgt_emb = model.pos_encoding(tgt_emb)
+            decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
+            logits = model.fc_out(decoder_output[:, -1, :])
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+            topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
+
+            for new_k in range(beam_width):
+                decoded_t = topk_indexes[0][new_k].view(1)
+                logp = topk_log_prob[0][new_k].item()
+
+                node = BeamSearchNode(h=None, prev_node=n, wid=decoded_t, logp=n.logp + logp, length=n.length + 1)
+                heappush(nodes, (-node.eval(), id(node), node))
+
+            n_dec_steps += 1
+
+        if len(end_nodes) == 0:
+            end_nodes = [heappop(nodes) for _ in range(beam_width)]
+
+        n_best_seq_list = []
+        for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
+            sequence = [n.wid.item()]
+            while n.prev_node is not None:
+                n = n.prev_node
+                sequence.append(n.wid.item())
+            sequence = sequence[::-1]
+            n_best_seq_list.append(sequence)
+
+        n_best_list[batch_id] = n_best_seq_list
+
+    return n_best_list
 
 if __name__ == "__main__":
     PAD_IDX = 1
@@ -204,6 +261,14 @@ if __name__ == "__main__":
     src_stoi = dataloader_creater.vocab_src_stoi
     vocab_size_src = dataloader_creater.vocab_size_src
     vocab_size_tgt = dataloader_creater.vocab_size_tgt
+    
+    test_dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
+    test_dataloader = test_dataloader_creater.create_dataloader(test_jp_list, test_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
+    test_tgt_itos = test_dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
+    test_tgt_stoi = test_dataloader_creater.vocab_tgt_stoi
+    test_src_stoi = test_dataloader_creater.vocab_src_stoi
+    test_vocab_size_src = test_dataloader_creater.vocab_size_src
+    test_vocab_size_tgt = test_dataloader_creater.vocab_size_tgt
 
     # モデルのハイパーパラメータ
     embedding_dim = 512
@@ -211,30 +276,22 @@ if __name__ == "__main__":
     num_layers = 4
     lr_rate = 1e-4
 
-    model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
-
-# モデルの状態をロード
-    model.load_state_dict(torch.load('model_weight_4.pth'))
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    # モデルの状態をロード
     logger.info("Loading model...")
-    logger.info("Translating...")
-    predicted_list = []
-    for jp_text,en_text in tqdm(zip(test_jp_list, test_en_list)):
-        predicted_text = translate(model, jp_text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
-        predicted_list.append(predicted_text)
+    model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
+    model.load_state_dict(torch.load('model_weight_4.pth'))
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    
+    # パラメータ設定
+    beam_width = 5
+    n_best = 3
+    bos_token = 2  # <sos> トークンのインデックス
+    eos_token = 3  # <eos> トークンのインデックス
+    max_dec_steps = 20
 
-    bleu = BLEU()
-    score = bleu.corpus_score(predicted_list, [test_en_list])
-    print(f"BLEU Score: {score}")
-
-
-'''
-BLEU = 45.07 70.6/42.9/36.4/37.5 (BP = 1.000 ratio = 1.000 hyp_len = 17 ref_len = 17)の意味
-
-BLEU = 45.07: これはBLEUスコアの値で、システム翻訳の全体的な品質を示します。通常、0から100の範囲で評価されます。
-70.6/42.9/36.4/37.5: これは1-gram、2-gram、3-gram、4-gramの精度を示しています。各数値はそれぞれのn-gramがどれだけ参照翻訳と一致しているかを表しています。
-BP = 1.000: これはブレベティペナルティ（Brevity Penalty）で、システム翻訳が参照翻訳より短すぎる場合にスコアを調整します。1.000はペナルティが適用されていないことを示します。
-ratio = 1.000: これはシステム翻訳の長さと参照翻訳の長さの比率です。1.000は長さがほぼ等しいことを示します。
-hyp_len = 17: これはシステム翻訳の総単語数です。
-ref_len = 17: これは参照翻訳の総単語数です。
-'''
+    logger.info("Decoding...")
+    first_batch = next(iter(test_dataloader)) #test_loaderの最初のバッチだけ
+    src, tgt = first_batch
+    output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
+    print(output_sequences)
