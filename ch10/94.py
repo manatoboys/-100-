@@ -295,3 +295,7 @@ if __name__ == "__main__":
     src, tgt = first_batch
     output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
     print(output_sequences)
+
+
+    #output
+    #BLEU Score: BLEU = 3.60 29.0/6.8/2.3/0.9 (BP = 0.788 ratio = 0.807 hyp_len = 21441 ref_len = 26560)
