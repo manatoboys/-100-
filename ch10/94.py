@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import logging
+from sacrebleu import BLEU
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -92,7 +93,7 @@ class DataLoaderCreater:
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, self.vocab_tgt_stoi, self.tgt_tokenizer)) for en_data in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=200, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=128, collate_fn=collate_fn, num_workers = 16, shuffle=False)
 
         return dataloader
 
@@ -225,13 +226,24 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
 
     return n_best_list
 
+def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_token=3):
+    with torch.no_grad():
+        model.eval()
+        model.to(device)
+        if bos_token in index_list:
+            index_list.remove(bos_token)
+        if eos_token in index_list:
+            index_list.remove(eos_token)
+        english_text = " ".join([tgt_itos[en] for en in index_list])
+    return english_text
+
 if __name__ == "__main__":
     PAD_IDX = 1
     JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
     EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
 
-    JP_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.ja"
-    EN_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.en"
+    JP_DEV_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-dev.ja"
+    EN_DEV_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-dev.en"
 
     logger.info("Loading tokenizers...")
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
@@ -246,13 +258,13 @@ if __name__ == "__main__":
         train_en_list = f.readlines()
         train_en_list = [en.strip("\n") for en in train_en_list]
 
-    with open(JP_TEST_FILE_PATH, "r", encoding="utf-8")as f:
-        test_jp_list = f.readlines()
-        test_jp_list = [jp.strip("\n") for jp in test_jp_list]
+    with open(JP_DEV_FILE_PATH, "r", encoding="utf-8")as f:
+        dev_jp_list = f.readlines()
+        dev_jp_list = [jp.strip("\n") for jp in dev_jp_list]
 
-    with open(EN_TEST_FILE_PATH, "r", encoding="utf-8")as f:
-        test_en_list = f.readlines()
-        test_en_list = [en.strip("\n") for en in test_en_list]
+    with open(EN_DEV_FILE_PATH, "r", encoding="utf-8")as f:
+        dev_en_list = f.readlines()
+        dev_en_list = [en.strip("\n") for en in dev_en_list]
 
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
     dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
@@ -262,13 +274,13 @@ if __name__ == "__main__":
     vocab_size_src = dataloader_creater.vocab_size_src
     vocab_size_tgt = dataloader_creater.vocab_size_tgt
     
-    test_dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
-    test_dataloader = test_dataloader_creater.create_dataloader(test_jp_list, test_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
-    test_tgt_itos = test_dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
-    test_tgt_stoi = test_dataloader_creater.vocab_tgt_stoi
-    test_src_stoi = test_dataloader_creater.vocab_src_stoi
-    test_vocab_size_src = test_dataloader_creater.vocab_size_src
-    test_vocab_size_tgt = test_dataloader_creater.vocab_size_tgt
+    dev_dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
+    dev_dataloader = dev_dataloader_creater.create_dataloader(dev_jp_list, dev_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
+    dev_tgt_itos = dev_dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
+    dev_tgt_stoi = dev_dataloader_creater.vocab_tgt_stoi
+    dev_src_stoi = dev_dataloader_creater.vocab_src_stoi
+    dev_vocab_size_src = dev_dataloader_creater.vocab_size_src
+    dev_vocab_size_tgt = dev_dataloader_creater.vocab_size_tgt
 
     # モデルのハイパーパラメータ
     embedding_dim = 512
@@ -284,18 +296,23 @@ if __name__ == "__main__":
     model.to(device)
     
     # パラメータ設定
-    beam_width = 5
-    n_best = 3
+    beam_width = 100
+    n_best = 1
     bos_token = 2  # <sos> トークンのインデックス
     eos_token = 3  # <eos> トークンのインデックス
     max_dec_steps = 20
 
     logger.info("Decoding...")
-    first_batch = next(iter(test_dataloader)) #test_loaderの最初のバッチだけ
-    src, tgt = first_batch
-    output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
-    print(output_sequences)
-
-
-    #output
-    #BLEU Score: BLEU = 3.60 29.0/6.8/2.3/0.9 (BP = 0.788 ratio = 0.807 hyp_len = 21441 ref_len = 26560)
+    for batch_size in tqdm([1,10,30,50,80,100]):
+        all_predicted = []
+        predicted_text_list = []
+        for src, tgt in dev_dataloader:
+            output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
+            predicted_list = [data[0] for data in output_sequences]
+            all_predicted += predicted_list
+        for en_index in all_predicted:
+            predicted_text = translate_from_index(model, en_index, tgt_itos, device)
+            predicted_text_list.append(predicted_text)
+        bleu = BLEU()
+        score = bleu.corpus_score(predicted_text_list, [dev_en_list])
+        print(score)

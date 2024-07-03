@@ -226,6 +226,10 @@ if __name__ == "__main__":
     bleu = BLEU()
     score = bleu.corpus_score(predicted_list, [test_en_list])
     print(f"BLEU Score: {score}")
+    
+#output
+#BLEU Score: BLEU = 3.60 29.0/6.8/2.3/0.9 (BP = 0.788 ratio = 0.807 hyp_len = 21441 ref_len = 26560)
+
 
 
 '''
