@@ -14,6 +14,14 @@ import torch.optim as optim
 import os
 import logging
 
+model = None
+tokenizer_src = None
+tokenizer_tgt = None
+tgt_itos = None
+tgt_stoi = None
+src_stoi = None
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
 
@@ -170,13 +178,12 @@ def translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device):
 
 
 
-def main(text):
+@app.before_request
+def initialize():
+    global model, tokenizer_src, tokenizer_tgt, tgt_itos, tgt_stoi, src_stoi
     PAD_IDX = 1
     JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
     EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
-
-    JP_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.ja"
-    EN_TEST_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-test.en"
 
     logger.info("Preparing...")
     with open(JP_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
@@ -191,27 +198,24 @@ def main(text):
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
     tokenizer_tgt = get_tokenizer('spacy', language='en_core_web_sm')
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
-    dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
-    tgt_itos = dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
+    dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn)  # create_dataloaderを実行することで語彙が作成される
+    tgt_itos = dataloader_creater.vocab_tgt_itos  # 出力結果をindex→英文に変換
     tgt_stoi = dataloader_creater.vocab_tgt_stoi
     src_stoi = dataloader_creater.vocab_src_stoi
-    vocab_size_src = dataloader_creater.vocab_size_src
-    vocab_size_tgt = dataloader_creater.vocab_size_tgt
 
     # モデルのハイパーパラメータ
     embedding_dim = 512
     num_heads = 4
     num_layers = 4
 
-    model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
+    model = TransformerModel(dataloader_creater.vocab_size_src, dataloader_creater.vocab_size_tgt, embedding_dim, num_heads, num_layers)
 
-# モデルの状態をロード
+    # モデルの状態をロード
     model.load_state_dict(torch.load('model_weight_4.pth'))
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    logger.info("Loading model...")
-    logger.info("Translating...")
-    predicted_text = translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
-    return predicted_text
+    model.to(device)
+    logger.info("Model and vocabularies loaded.")
+
+
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -219,7 +223,7 @@ def index():
     result = ''
     if request.method == 'POST':
         text = request.form['text']
-        result = main(text)
+        result = translate(model, text, tgt_itos, tgt_stoi, src_stoi, tokenizer_src, device)
     return render_template_string('''
         <!doctype html>
         <html lang="ja">
@@ -239,4 +243,4 @@ def index():
     ''', result=result)
 
 if __name__ == '__main__':
-    app.run(debug=False, port=5052)
+    app.run(debug=False, port=5050)
