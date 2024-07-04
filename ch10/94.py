@@ -16,6 +16,7 @@ import torch.optim as optim
 import os
 import logging
 from sacrebleu import BLEU
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -196,14 +197,20 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
             tgt_emb = model.embedding_tgt(decoder_input)
             tgt_emb = model.pos_encoding(tgt_emb)
             decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
-            logits = model.fc_out(decoder_output[:, -1, :])
+            logits = model.fc_out(decoder_output[:,-1,:])
             log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            # print(f"log_probs.shape: {log_probs.shape}")
 
             topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
+            # print(f"topk_log_prob.shape: {topk_log_prob.shape}")
+            # print(f"topk_indexes.shape: {topk_indexes.shape}")
+            # print(f"topk_indexes: {topk_indexes}")
 
             for new_k in range(beam_width):
                 decoded_t = topk_indexes[0][new_k].view(1)
+                # print(f"decoded_t: {decoded_t}")
                 logp = topk_log_prob[0][new_k].item()
+                # print(f"logp: {logp}")
 
                 node = BeamSearchNode(h=None, prev_node=n, wid=decoded_t, logp=n.logp + logp, length=n.length + 1)
                 heappush(nodes, (-node.eval(), id(node), node))
@@ -230,10 +237,10 @@ def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_t
     with torch.no_grad():
         model.eval()
         model.to(device)
-        if bos_token in index_list:
-            index_list.remove(bos_token)
-        if eos_token in index_list:
-            index_list.remove(eos_token)
+        if index_list[0]==bos_token:
+            index_list = index_list[1:]
+        if index_list[-1]==eos_token:
+            index_list = index_list[:-1]
         english_text = " ".join([tgt_itos[en] for en in index_list])
     return english_text
 
@@ -300,13 +307,14 @@ if __name__ == "__main__":
     n_best = 1
     bos_token = 2  # <sos> トークンのインデックス
     eos_token = 3  # <eos> トークンのインデックス
-    max_dec_steps = 20
-
+    max_dec_steps = 100
+    scores = []
+    beam_width_list =[1,5,10]
     logger.info("Decoding...")
-    for batch_size in tqdm([1,10,30,50,80,100]):
+    for beam_width in beam_width_list:
         all_predicted = []
         predicted_text_list = []
-        for src, tgt in dev_dataloader:
+        for src, tgt in tqdm(dev_dataloader):
             output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
             predicted_list = [data[0] for data in output_sequences]
             all_predicted += predicted_list
@@ -315,4 +323,16 @@ if __name__ == "__main__":
             predicted_text_list.append(predicted_text)
         bleu = BLEU()
         score = bleu.corpus_score(predicted_text_list, [dev_en_list])
-        print(score)
+        scores.append(score.score)
+        print(f"beam_width:{beam_width}, Score:{score.score}")
+    
+
+    plt.plot(beam_width, scores)
+
+    # グラフのタイトルとラベルを設定
+    plt.title('beam_width Score')
+    plt.xlabel('beam_width')
+    plt.ylabel('score')
+
+    # グラフを表示
+    plt.show()
