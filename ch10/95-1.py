@@ -49,23 +49,23 @@ class DataLoaderCreater:
 
     def convert_text_to_indexes_src(self, text):
         ans = [self.sp_ja.PieceToId('<s>')] + self.sp_ja.EncodeAsIds(text.strip("\n")) + [self.sp_ja.PieceToId('</s>')]
-        return ans
+        return torch.tensor(ans, dtype=torch.long)
         
 
     def convert_text_to_indexes_tgt(self, text):
         ans = [self.sp_en.PieceToId('<s>')] + self.sp_en.EncodeAsIds(text.strip("\n")) + [self.sp_en.PieceToId('</s>')]
-        return ans
+        return torch.tensor(ans, dtype=torch.long)
 
 
     def create_dataloader(self, jp_list, en_list, collate_fn):
-        jp_list = [self.convert_text_to_indexes_src(jp) for jp in jp_list]
-        en_list = [self.convert_text_to_indexes_src(en) for en in en_list]
         jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
-        src_data = [torch.tensor(data[0]) for data in jp_en_list]
-        tgt_data = [torch.tensor(data[1]) for data in jp_en_list]
+        jp_list = [data[0] for data in jp_en_list]
+        en_list = [data[1] for data in jp_en_list]
+        src_data = [self.convert_text_to_indexes_src(jp) for jp in jp_list]
+        tgt_data = [self.convert_text_to_indexes_tgt(en) for en in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=200, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=1024, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
@@ -226,20 +226,20 @@ if __name__ == "__main__":
     embedding_dim = 512
     num_heads = 4
     num_layers = 4
-    lr_rate = 1e-4
+    lr_rate = 1e-3
     vocab_size_src = sp_ja.GetPieceSize()
     vocab_size_tgt = sp_en.GetPieceSize()
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.device_count() > 1:
         print(f"Let's use {torch.cuda.device_count()} GPUs!")
-        model = nn.DataParallel(model)
+        model = nn.DataParallel(model, device_ids=[0,1,3])
     model.to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     optimizer = optim.Adam(model.parameters(), lr=lr_rate)
 
     logger.info("Starting training loop...")
-    num_epochs = 10
+    num_epochs = 12
 
     model.train()
     for epoch in tqdm(range(num_epochs)):
@@ -247,5 +247,28 @@ if __name__ == "__main__":
         logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
 
     logger.info("Saving model...")
-    torch.save(model.state_dict(),'model_weight_sentencepiece.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
+    torch.save(model.module.state_dict(),'model_weight_sentencepiece_2.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
     logger.info("Training complete.")
+    
+# weight2
+# Let's use 4 GPUs!
+# 2024-07-07 11:05:13,712 - INFO - Starting training loop...
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.34s/it]
+# 2024-07-07 11:25:57,609 - INFO - Epoch 1, Train Loss: 0.0124██████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.10s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:40<00:00,  3.34s/it]
+# 2024-07-07 11:46:38,325 - INFO - Epoch 2, Train Loss: 0.0103██████████████████████████████████████████████████████| 372/372 [20:40<00:00,  3.35s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:41<00:00,  3.34s/it]
+# 2024-07-07 12:07:20,211 - INFO - Epoch 3, Train Loss: 0.0094██████████████████████████████████████████████████████| 372/372 [20:41<00:00,  3.51s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:37<00:00,  3.33s/it]
+# 2024-07-07 12:27:57,271 - INFO - Epoch 4, Train Loss: 0.0088██████████████████████████████████████████████████████| 372/372 [20:36<00:00,  3.42s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:35<00:00,  3.32s/it]
+# 2024-07-07 12:48:32,961 - INFO - Epoch 5, Train Loss: 0.0084██████████████████████████████████████████████████████| 372/372 [20:35<00:00,  3.47s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:46<00:00,  3.35s/it]
+# 2024-07-07 13:09:19,682 - INFO - Epoch 6, Train Loss: 0.0080██████████████████████████████████████████████████████| 372/372 [20:46<00:00,  3.29s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:44<00:00,  3.35s/it]
+# 2024-07-07 13:30:04,119 - INFO - Epoch 7, Train Loss: 0.0077██████████████████████████████████████████████████████| 372/372 [20:44<00:00,  3.46s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.34s/it]
+# 2024-07-07 13:50:47,614 - INFO - Epoch 8, Train Loss: 0.0073██████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.37s/it]
+# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 8/8 [2:45:33<00:00, 1241.74s/it]
+# 2024-07-07 13:50:47,614 - INFO - Saving model...
+# 2024-07-07 13:50:47,915 - INFO - Training complete.

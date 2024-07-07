@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import logging
-from torch.utils.tensorboard import SummaryWriter
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -91,32 +90,6 @@ class DataLoaderCreater:
         dataset = datasets(src_data, tgt_data)
 
         dataloader = DataLoader(dataset, batch_size=256, collate_fn=collate_fn, num_workers = 16, shuffle=True)
-
-        return dataloader
-    
-class Test_DataLoaderCreater:
-
-    def __init__(self, src_tokenizer, tgt_tokenizer):
-        self.src_tokenizer = src_tokenizer
-        self.tgt_tokenizer = tgt_tokenizer
-
-    def convert_text_to_indexes_tgt(self, text, vocab, tokenizer):
-        return [vocab['<bos>']] + [
-            vocab[token] if token in vocab else vocab['<unk>'] for token in tokenizer(text.strip("\n"))
-        ] + [vocab['<eos>']]
-
-    def convert_text_to_indexes_src(self, text, vocab, tokenizer):
-        return  [vocab[token] if token in vocab else vocab['<unk>'] for token in tokenizer(text.strip("\n"))]
-
-    def create_dataloader(self, jp_list, en_list, src_stoi, tgt_stoi, collate_fn):
-        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
-        self.jp_list = [data[0] for data in jp_en_list]
-        self.en_list = [data[1] for data in jp_en_list]
-        src_data = [torch.tensor(self.convert_text_to_indexes_src(jp_data, src_stoi, self.src_tokenizer)) for jp_data in self.jp_list]
-        tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, tgt_stoi, self.tgt_tokenizer)) for en_data in self.en_list]
-        dataset = datasets(src_data, tgt_data)
-
-        dataloader = DataLoader(dataset, batch_size=100, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
@@ -267,7 +240,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=lr_rate)
 
     # トレーニングループ
-    num_epochs = 10
+    num_epochs = 100
     
     model.train()
     logger.info("Starting training loop...")
@@ -276,6 +249,5 @@ if __name__ == "__main__":
         logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
 
     logger.info("Saving model...")
-    torch.save(model.state_dict(),'model_weight_4.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
+    torch.save(model.state_dict(),'98_model_weight.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
     logger.info("Training complete.")
-

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import logging
-from sacrebleu import BLEU
+from sacrebleu.metrics import BLEU
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger("ログ")
@@ -44,7 +44,7 @@ class datasets(Dataset):
     def __getitem__(self, index):
         jp = self.jp_datas[index]
         en = self.en_datas[index]
-        return jp,en
+        return jp,en, index
 
 class DataLoaderCreater:
 
@@ -94,16 +94,42 @@ class DataLoaderCreater:
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, self.vocab_tgt_stoi, self.tgt_tokenizer)) for en_data in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=128, collate_fn=collate_fn, num_workers = 16, shuffle=False)
+        dataloader = DataLoader(dataset, batch_size=100, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+
+        return dataloader
+    
+class Test_DataLoaderCreater:
+
+    def __init__(self, src_tokenizer, tgt_tokenizer):
+        self.src_tokenizer = src_tokenizer
+        self.tgt_tokenizer = tgt_tokenizer
+
+    def convert_text_to_indexes_tgt(self, text, vocab, tokenizer):
+        return [vocab['<bos>']] + [
+            vocab[token] if token in vocab else vocab['<unk>'] for token in tokenizer(text.strip("\n"))
+        ] + [vocab['<eos>']]
+
+    def convert_text_to_indexes_src(self, text, vocab, tokenizer):
+        return  [vocab[token] if token in vocab else vocab['<unk>'] for token in tokenizer(text.strip("\n"))]
+
+    def create_dataloader(self, jp_list, en_list, src_stoi, tgt_stoi, collate_fn):
+        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
+        self.jp_list = [data[0] for data in jp_en_list]
+        self.en_list = [data[1] for data in jp_en_list]
+        src_data = [torch.tensor(self.convert_text_to_indexes_src(jp_data, src_stoi, self.src_tokenizer)) for jp_data in self.jp_list]
+        tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, tgt_stoi, self.tgt_tokenizer)) for en_data in self.en_list]
+        dataset = datasets(src_data, tgt_data)
+
+        dataloader = DataLoader(dataset, batch_size=100, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
 def collate_fn(batch):
-    src_batch, tgt_batch = zip(*batch)
+    src_batch, tgt_batch, index_batch = zip(*batch)
 
     src_batch = pad_sequence(src_batch, padding_value=PAD_IDX,  batch_first=True)
     tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX, batch_first=True)
-    return src_batch, tgt_batch
+    return src_batch, tgt_batch, index_batch
 
 class PositionalEncoding(nn.Module):
     def __init__(self, embedding_dim):
@@ -151,15 +177,15 @@ class TransformerModel(nn.Module):
         output = self.fc_out(output)
         return output
 
+
 class BeamSearchNode(object):
-    def __init__(self, h, prev_node, wid, logp, length):
-        self.h = h
-        self.prev_node = prev_node
+    def __init__(self, wid, logp, length):
         self.wid = wid
         self.logp = logp
         self.length = length
 
     def eval(self):
+        #正則化項を導入することで長い文章を生成しやすくしている。
         return self.logp / float(self.length - 1 + 1e-6)
 
 def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, max_dec_steps, device):
@@ -175,7 +201,7 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
     for batch_id in range(batch_size):
         end_nodes = []
         decoder_input = torch.tensor([[sos_token]]).to(device)
-        node = BeamSearchNode(h=None, prev_node=None, wid=decoder_input, logp=0, length=1)
+        node = BeamSearchNode(wid=[sos_token], logp=0, length=1)
         nodes = []
         heappush(nodes, (-node.eval(), id(node), node))
         n_dec_steps = 0
@@ -184,54 +210,113 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
             if n_dec_steps > max_dec_steps:
                 break
 
-            score, _, n = heappop(nodes)
-            decoder_input = n.wid
+            temp_nodes = []
+            for _ in range(min(len(nodes), beam_width)):
+                score, _, n = heappop(nodes)
+                decoder_input = torch.tensor([n.wid]).to(device)
 
-            if n.wid.item() == eos_token and n.prev_node is not None:
-                end_nodes.append((score, id(n), n))
-                if len(end_nodes) >= n_best:
-                    break
-                else:
-                    continue
+                if n.wid[-1] == eos_token and len(n.wid) > 1:
+                    end_nodes.append((score, id(n), n))
+                    if len(end_nodes) >= n_best:
+                        break
+                    else:
+                        continue
 
-            tgt_emb = model.embedding_tgt(decoder_input)
-            tgt_emb = model.pos_encoding(tgt_emb)
-            decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
-            logits = model.fc_out(decoder_output[:,-1,:])
-            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-            # print(f"log_probs.shape: {log_probs.shape}")
+                tgt_emb = model.embedding_tgt(decoder_input)
+                tgt_emb = model.pos_encoding(tgt_emb)
+                decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
+                logits = model.fc_out(decoder_output[:, -1, :])
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
-            topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
-            # print(f"topk_log_prob.shape: {topk_log_prob.shape}")
-            # print(f"topk_indexes.shape: {topk_indexes.shape}")
-            # print(f"topk_indexes: {topk_indexes}")
+                topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
 
-            for new_k in range(beam_width):
-                decoded_t = topk_indexes[0][new_k].view(1)
-                # print(f"decoded_t: {decoded_t}")
-                logp = topk_log_prob[0][new_k].item()
-                # print(f"logp: {logp}")
+                for new_k in range(beam_width):
+                    decoded_t = topk_indexes[0][new_k].item()
+                    logp = topk_log_prob[0][new_k].item()
+                    new_wid = n.wid + [decoded_t]
+                    new_node = BeamSearchNode(wid=new_wid, logp=n.logp + logp, length=n.length + 1)
+                    heappush(temp_nodes, (-new_node.eval(), id(new_node), new_node))
 
-                node = BeamSearchNode(h=None, prev_node=n, wid=decoded_t, logp=n.logp + logp, length=n.length + 1)
-                heappush(nodes, (-node.eval(), id(node), node))
-
+            nodes = temp_nodes
             n_dec_steps += 1
+
+            if len(end_nodes) >= beam_width:
+                break
 
         if len(end_nodes) == 0:
             end_nodes = [heappop(nodes) for _ in range(beam_width)]
 
         n_best_seq_list = []
+
+        #一番確率が高いやつを抽出
         for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
-            sequence = [n.wid.item()]
-            while n.prev_node is not None:
-                n = n.prev_node
-                sequence.append(n.wid.item())
-            sequence = sequence[::-1]
+            sequence = n.wid
+            if sequence[0] == sos_token:
+                sequence = sequence[1:]
+            if sequence[-1] == eos_token:
+                sequence = sequence[:-1]
             n_best_seq_list.append(sequence)
+            if len(n_best_seq_list) >= n_best:
+                break
 
         n_best_list[batch_id] = n_best_seq_list
 
     return n_best_list
+
+    # for batch_id in range(batch_size):
+    #     end_nodes = []
+    #     decoder_input = torch.tensor([[sos_token]]).to(device)
+    #     node = BeamSearchNode(wid=[sos_token], logp=0, length=1)
+    #     nodes = []
+    #     heappush(nodes, (-node.eval(), id(node), node))
+    #     n_dec_steps = 0
+
+    #     while True:
+    #         if n_dec_steps > max_dec_steps:
+    #             break
+
+    #         score, _, n = heappop(nodes)
+    #         decoder_input = torch.tensor([n.wid]).to(device)
+
+    #         if n.wid[-1] == eos_token and len(n.wid) > 1:
+    #             end_nodes.append((score, id(n), n))
+    #             if len(end_nodes) >= n_best:
+    #                 break
+    #             else:
+    #                 continue
+
+    #         tgt_emb = model.embedding_tgt(decoder_input)
+    #         tgt_emb = model.pos_encoding(tgt_emb)
+    #         decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
+    #         logits = model.fc_out(decoder_output[:, -1, :])
+    #         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+    #         topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
+
+    #         for new_k in range(beam_width):
+    #             decoded_t = topk_indexes[0][new_k].item()
+    #             logp = topk_log_prob[0][new_k].item()
+    #             new_wid = n.wid + [decoded_t]
+    #             node = BeamSearchNode(wid=new_wid, logp=n.logp + logp, length=n.length + 1)
+    #             heappush(nodes, (-node.eval(), id(node), node))
+
+    #         n_dec_steps += 1
+
+    #     if len(end_nodes) == 0:
+    #         end_nodes = [heappop(nodes) for _ in range(beam_width)]
+
+    #     n_best_seq_list = []
+    #     for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
+    #         sequence = n.wid
+    #         if sequence[0] == sos_token:
+    #             sequence = sequence[1:]
+    #         if sequence[-1] == eos_token:
+    #             sequence = sequence[:-1]
+    #         n_best_seq_list.append(sequence)
+
+    #     n_best_list[batch_id] = n_best_seq_list
+
+    # return n_best_list
 
 def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_token=3):
     with torch.no_grad():
@@ -241,7 +326,8 @@ def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_t
             index_list = index_list[1:]
         if index_list[-1]==eos_token:
             index_list = index_list[:-1]
-        english_text = " ".join([tgt_itos[en] for en in index_list])
+        #.や,の前に空白がある場合は空白を削除する
+        english_text = " ".join([tgt_itos[en] for en in index_list]).replace(' .', '.').replace(' ,', ',').replace(" ' ", "'").replace(" n't", "n't").replace(" 'm", "'m").replace(" 're", "'re").replace(" 've", "'ve").replace(" 'll", "'ll").replace(" 's", "'s")
     return english_text
 
 if __name__ == "__main__":
@@ -281,14 +367,10 @@ if __name__ == "__main__":
     vocab_size_src = dataloader_creater.vocab_size_src
     vocab_size_tgt = dataloader_creater.vocab_size_tgt
     
-    dev_dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
-    dev_dataloader = dev_dataloader_creater.create_dataloader(dev_jp_list, dev_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
-    dev_tgt_itos = dev_dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
-    dev_tgt_stoi = dev_dataloader_creater.vocab_tgt_stoi
-    dev_src_stoi = dev_dataloader_creater.vocab_src_stoi
-    dev_vocab_size_src = dev_dataloader_creater.vocab_size_src
-    dev_vocab_size_tgt = dev_dataloader_creater.vocab_size_tgt
-
+    dev_dataloader_creater = Test_DataLoaderCreater(tokenizer_src, tokenizer_tgt)
+    dev_dataloader = dev_dataloader_creater.create_dataloader(dev_jp_list, dev_en_list, src_stoi, tgt_stoi, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
+    jp_list = dev_dataloader_creater.jp_list
+    en_list = dev_dataloader_creater.en_list
     # モデルのハイパーパラメータ
     embedding_dim = 512
     num_heads = 4
@@ -298,36 +380,42 @@ if __name__ == "__main__":
     # モデルの状態をロード
     logger.info("Loading model...")
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
-    model.load_state_dict(torch.load('model_weight_4.pth'))
+    model.load_state_dict(torch.load('model_weight_3.pth'))
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     
     # パラメータ設定
-    beam_width = 100
-    n_best = 1
+    n_best = 1 #これ必要ない
     bos_token = 2  # <sos> トークンのインデックス
     eos_token = 3  # <eos> トークンのインデックス
     max_dec_steps = 100
     scores = []
-    beam_width_list =[1,5,10]
+    beam_width_list =[1, 5, 10, 20]
     logger.info("Decoding...")
     for beam_width in beam_width_list:
         all_predicted = []
         predicted_text_list = []
-        for src, tgt in tqdm(dev_dataloader):
+        refs = []
+        index_list =[]
+        for src, tgt, index in tqdm(dev_dataloader):
             output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
             predicted_list = [data[0] for data in output_sequences]
             all_predicted += predicted_list
+            index_list += index
         for en_index in all_predicted:
             predicted_text = translate_from_index(model, en_index, tgt_itos, device)
             predicted_text_list.append(predicted_text)
+        refs = []
+        for i in index_list:
+            refs.append(en_list[i])
+        max_index = max(index_list)
+        
         bleu = BLEU()
-        score = bleu.corpus_score(predicted_text_list, [dev_en_list])
+        score = bleu.corpus_score(predicted_text_list, [refs])
         scores.append(score.score)
-        print(f"beam_width:{beam_width}, Score:{score.score}")
-    
+        print(f"beam_width:{beam_width}, score:{score}")
 
-    plt.plot(beam_width, scores)
+    plt.plot(beam_width_list, scores)
 
     # グラフのタイトルとラベルを設定
     plt.title('beam_width Score')
@@ -335,4 +423,30 @@ if __name__ == "__main__":
     plt.ylabel('score')
 
     # グラフを表示
-    plt.show()
+    plt.savefig("94_graph_3.png")
+
+
+    '''
+    beam_width:1, score:BLEU = 3.83 41.4/11.6/4.6/2.2 (BP = 0.460 ratio = 0.563 hyp_len = 13676 ref_len = 24281)
+    '''
+
+#graph_4 weight4 & alpha=0.8
+
+#weight4
+'''
+100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 7/7 [04:32<00:00, 38.89s/it]
+max(index_list):{max_index}
+beam_width:1, score:BLEU = 8.92 36.5/12.7/6.3/3.3 (BP = 0.898 ratio = 0.903 hyp_len = 4905 ref_len = 5432)
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 7/7 [16:25<00:00, 140.84s/it]
+max(index_list):{max_index}
+beam_width:5, score:BLEU = 9.58 41.7/15.7/8.3/4.7 (BP = 0.758 ratio = 0.783 hyp_len = 4255 ref_len = 5432)
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 7/7 [29:42<00:00, 254.71s/it]
+max(index_list):{max_index}
+beam_width:10, score:BLEU = 9.18 41.9/15.8/8.5/4.4 (BP = 0.732 ratio = 0.762 hyp_len = 4141 ref_len = 5432)
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 7/7 [55:42<00:00, 477.46s/it]
+max(index_list):{max_index}
+beam_width:20, score:BLEU = 9.26 42.5/16.1/8.4/4.6 (BP = 0.725 ratio = 0.757 hyp_len = 4110 ref_len = 5432)
+100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 7/7 [1:22:21<00:00, 705.92s/it]
+max(index_list):{max_index}
+beam_width:30, score:BLEU = 9.42 41.3/15.9/8.4/4.6 (BP = 0.748 ratio = 0.775 hyp_len = 4210 ref_len = 5432)
+'''
