@@ -61,7 +61,7 @@ class DataLoaderCreater:
 
 
     def create_dataloader(self, jp_list, en_list, collate_fn):
-        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
+        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<150 and len(en)<150] #系列長が250未満のものだけを訓練に使用する
         jp_list = [data[0] for data in jp_en_list]
         en_list = [data[1] for data in jp_en_list]
         src_data = [self.convert_text_to_indexes_src(jp) for jp in jp_list]
@@ -89,16 +89,14 @@ class Test_DataLoaderCreater:
         return torch.tensor(ans, dtype=torch.long)
 
     def create_dataloader(self, jp_list, en_list, collate_fn):
-        print(en_list[0])
-        print(len(en_list[0]))
-        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
+        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<150 and len(en)<150] #系列長が250未満のものだけを訓練に使用する
         self.jp_list = [data[0] for data in jp_en_list]
         self.en_list = [data[1] for data in jp_en_list]
         src_data = [self.convert_text_to_indexes_src(jp) for jp in self.jp_list]
         tgt_data = [self.convert_text_to_indexes_tgt(en) for en in self.en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=100, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=200, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
@@ -256,7 +254,6 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
 
 def translate_from_index(model, index_list, sp_en, device):
     with torch.no_grad():
-        model.eval()
         model.to(device)
         english_text = sp_en.DecodeIds(index_list)
         #.や,の前に空白がある場合は空白を削除する
@@ -296,30 +293,28 @@ if __name__ == "__main__":
         dev_en_list = [en.strip("\n") for en in dev_en_list]
 
     logger.info("Creating Dataloader...")
-    dataloader_creater = DataLoaderCreater(sp_ja, sp_en)
-    train_dataloader = dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
-    
+
     test_dataloader_creater = Test_DataLoaderCreater(sp_ja, sp_en)
     test_dataloader = test_dataloader_creater.create_dataloader(dev_jp_list, dev_en_list, collate_fn)
     en_list = test_dataloader_creater.en_list
 
     # モデルのハイパーパラメータ
-    embedding_dim = 512
+    embedding_dim = 256
     num_heads = 4
     num_layers = 4
     lr_rate = 1e-4
     vocab_size_src = sp_ja.GetPieceSize()
     vocab_size_tgt = sp_en.GetPieceSize()
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
-    model.load_state_dict(torch.load('model_weight_sentencepiece_2.pth'))
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.load_state_dict(torch.load('model_weight_sentencepiece.pth'))
+    device = torch.device('cuda:3' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     model.eval()
     
     n_best = 1 
     bos_token = 2  # <sos> トークンのインデックス
     eos_token = 3  # <eos> トークンのインデックス
-    max_dec_steps = 200
+    max_dec_steps = 100
     scores = []
     beam_width_list =[1, 5, 10]
     logger.info("Decoding...")
@@ -328,20 +323,21 @@ if __name__ == "__main__":
         predicted_text_list = []
         refs = []
         index_list =[]
+        
         for src, tgt, index in tqdm(test_dataloader):
             output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
             predicted_list = [data[0] for data in output_sequences]
             all_predicted += predicted_list
-            index_list += index
-            break
+            index_list += index     
+            break  
         for en_index in all_predicted:
             predicted_text = translate_from_index(model, en_index, sp_en, device)
             predicted_text_list.append(predicted_text)
         refs = []
         for i in index_list:
             refs.append(en_list[i])
-        print(predicted_text_list)
-        print(refs)
+        print(predicted_text_list[:10])
+        print(refs[:10])
         
         bleu = BLEU()
         score = bleu.corpus_score(predicted_text_list, [refs])
@@ -358,6 +354,8 @@ if __name__ == "__main__":
     # グラフを表示
     plt.savefig("95-2_graph.png")
 
-    
+    # beam_width:1, score:BLEU = 9.48 37.1/13.0/5.8/3.0 (BP = 0.992 ratio = 0.992 hyp_len = 2099 ref_len = 2115)
+    # beam_width:5, score:BLEU = 13.09 43.8/19.0/9.7/5.0 (BP = 0.921 ratio = 0.924 hyp_len = 2239 ref_len = 2424)
+    # beam_width:10, score:BLEU = 12.95 44.4/19.3/10.3/5.1 (BP = 0.886 ratio = 0.892 hyp_len = 2036 ref_len = 2282)
 
     

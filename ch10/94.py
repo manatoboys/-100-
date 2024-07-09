@@ -194,7 +194,7 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
     memory = model.embedding_src(src)
     memory = model.pos_encoding(memory)
     memory = model.transformer.encoder(memory)
-    
+
     batch_size = src.size(0)
     n_best_list = [[] for _ in range(batch_size)]
 
@@ -262,61 +262,6 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
         n_best_list[batch_id] = n_best_seq_list
 
     return n_best_list
-
-    # for batch_id in range(batch_size):
-    #     end_nodes = []
-    #     decoder_input = torch.tensor([[sos_token]]).to(device)
-    #     node = BeamSearchNode(wid=[sos_token], logp=0, length=1)
-    #     nodes = []
-    #     heappush(nodes, (-node.eval(), id(node), node))
-    #     n_dec_steps = 0
-
-    #     while True:
-    #         if n_dec_steps > max_dec_steps:
-    #             break
-
-    #         score, _, n = heappop(nodes)
-    #         decoder_input = torch.tensor([n.wid]).to(device)
-
-    #         if n.wid[-1] == eos_token and len(n.wid) > 1:
-    #             end_nodes.append((score, id(n), n))
-    #             if len(end_nodes) >= n_best:
-    #                 break
-    #             else:
-    #                 continue
-
-    #         tgt_emb = model.embedding_tgt(decoder_input)
-    #         tgt_emb = model.pos_encoding(tgt_emb)
-    #         decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
-    #         logits = model.fc_out(decoder_output[:, -1, :])
-    #         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
-    #         topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
-
-    #         for new_k in range(beam_width):
-    #             decoded_t = topk_indexes[0][new_k].item()
-    #             logp = topk_log_prob[0][new_k].item()
-    #             new_wid = n.wid + [decoded_t]
-    #             node = BeamSearchNode(wid=new_wid, logp=n.logp + logp, length=n.length + 1)
-    #             heappush(nodes, (-node.eval(), id(node), node))
-
-    #         n_dec_steps += 1
-
-    #     if len(end_nodes) == 0:
-    #         end_nodes = [heappop(nodes) for _ in range(beam_width)]
-
-    #     n_best_seq_list = []
-    #     for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
-    #         sequence = n.wid
-    #         if sequence[0] == sos_token:
-    #             sequence = sequence[1:]
-    #         if sequence[-1] == eos_token:
-    #             sequence = sequence[:-1]
-    #         n_best_seq_list.append(sequence)
-
-    #     n_best_list[batch_id] = n_best_seq_list
-
-    # return n_best_list
 
 def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_token=3):
     with torch.no_grad():
@@ -402,6 +347,7 @@ if __name__ == "__main__":
             predicted_list = [data[0] for data in output_sequences]
             all_predicted += predicted_list
             index_list += index
+            break
         for en_index in all_predicted:
             predicted_text = translate_from_index(model, en_index, tgt_itos, device)
             predicted_text_list.append(predicted_text)

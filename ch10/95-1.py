@@ -1,8 +1,4 @@
-import polars as pl
 import torch
-from torchtext.data.utils import get_tokenizer
-from torchtext.vocab import vocab
-from collections import Counter
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
@@ -25,7 +21,7 @@ ch.setFormatter(formatter)
 
 # ロガーにハンドラを追加
 logger.addHandler(ch)
-
+PAD_IDX = 1
 
 class datasets(Dataset):
     def __init__(self, text, label):
@@ -58,14 +54,14 @@ class DataLoaderCreater:
 
 
     def create_dataloader(self, jp_list, en_list, collate_fn):
-        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が250未満のものだけを訓練に使用する
+        jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<200 and len(en)<200] #系列長が250未満のものだけを訓練に使用する
         jp_list = [data[0] for data in jp_en_list]
         en_list = [data[1] for data in jp_en_list]
         src_data = [self.convert_text_to_indexes_src(jp) for jp in jp_list]
         tgt_data = [self.convert_text_to_indexes_tgt(en) for en in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=1024, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=400, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
@@ -135,15 +131,6 @@ class TransformerModel(nn.Module):
         output = self.fc_out(output)
         return output
 
-# def generate_square_subsequent_mask(sz: int, device: torch.device) -> torch.Tensor:
-#     mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
-#     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-#     return mask
-
-# def create_pad_mask(input_word, pad_idx=1):
-#     pad_mask = input_word == pad_idx
-#     return pad_mask.float()
-
 def train_epoch(model, dataloader, criterion, optimizer, device):
     epoch_loss = 0
     for batch_idx, (src, tgt) in enumerate(tqdm(dataloader)):
@@ -186,7 +173,7 @@ if __name__ == "__main__":
     logger.info("Preparing SentencePiece")
     # 学習の実行
     spm.SentencePieceTrainer.Train(
-    '--pad_id=1 --unk_id=0 --bos_id=2 --eos_id=3 --input=./kftt-data-1.0/data/orig/kyoto-train.ja --model_prefix=sentencepiece_ja --vocab_size=15000 --character_coverage=0.9995'
+    '--pad_id=1 --unk_id=0 --bos_id=2 --eos_id=3 --input=./kftt-data-1.0/data/orig/kyoto-train.ja --model_prefix=sentencepiece_ja --vocab_size=32000 --character_coverage=0.9995'
     )
     
     sp_ja = spm.SentencePieceProcessor()
@@ -194,7 +181,7 @@ if __name__ == "__main__":
     
      # 学習の実行
     spm.SentencePieceTrainer.Train(
-    '--pad_id=1 --unk_id=0 --bos_id=2 --eos_id=3 --input=./kftt-data-1.0/data/orig/kyoto-train.en --model_prefix=sentencepiece_en --vocab_size=15000 --character_coverage=0.9995'
+    '--pad_id=1 --unk_id=0 --bos_id=2 --eos_id=3 --input=./kftt-data-1.0/data/orig/kyoto-train.en --model_prefix=sentencepiece_en --vocab_size=20000 --character_coverage=1.000'
     )
     
     sp_en = spm.SentencePieceProcessor()
@@ -223,23 +210,23 @@ if __name__ == "__main__":
 
 
     # モデルのハイパーパラメータ
-    embedding_dim = 512
+    embedding_dim = 256
     num_heads = 4
     num_layers = 4
-    lr_rate = 1e-3
+    lr_rate = 5e-4
     vocab_size_src = sp_ja.GetPieceSize()
     vocab_size_tgt = sp_en.GetPieceSize()
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.device_count() > 1:
         print(f"Let's use {torch.cuda.device_count()} GPUs!")
-        model = nn.DataParallel(model, device_ids=[0,1,3])
+        model = nn.DataParallel(model)
     model.to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     optimizer = optim.Adam(model.parameters(), lr=lr_rate)
 
     logger.info("Starting training loop...")
-    num_epochs = 12
+    num_epochs = 10
 
     model.train()
     for epoch in tqdm(range(num_epochs)):
@@ -247,28 +234,37 @@ if __name__ == "__main__":
         logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
 
     logger.info("Saving model...")
-    torch.save(model.module.state_dict(),'model_weight_sentencepiece_2.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
+    torch.save(model.module.state_dict(),'model_weight_sentencepiece.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
     logger.info("Training complete.")
     
-# weight2
-# Let's use 4 GPUs!
-# 2024-07-07 11:05:13,712 - INFO - Starting training loop...
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.34s/it]
-# 2024-07-07 11:25:57,609 - INFO - Epoch 1, Train Loss: 0.0124██████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.10s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:40<00:00,  3.34s/it]
-# 2024-07-07 11:46:38,325 - INFO - Epoch 2, Train Loss: 0.0103██████████████████████████████████████████████████████| 372/372 [20:40<00:00,  3.35s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:41<00:00,  3.34s/it]
-# 2024-07-07 12:07:20,211 - INFO - Epoch 3, Train Loss: 0.0094██████████████████████████████████████████████████████| 372/372 [20:41<00:00,  3.51s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:37<00:00,  3.33s/it]
-# 2024-07-07 12:27:57,271 - INFO - Epoch 4, Train Loss: 0.0088██████████████████████████████████████████████████████| 372/372 [20:36<00:00,  3.42s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:35<00:00,  3.32s/it]
-# 2024-07-07 12:48:32,961 - INFO - Epoch 5, Train Loss: 0.0084██████████████████████████████████████████████████████| 372/372 [20:35<00:00,  3.47s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:46<00:00,  3.35s/it]
-# 2024-07-07 13:09:19,682 - INFO - Epoch 6, Train Loss: 0.0080██████████████████████████████████████████████████████| 372/372 [20:46<00:00,  3.29s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:44<00:00,  3.35s/it]
-# 2024-07-07 13:30:04,119 - INFO - Epoch 7, Train Loss: 0.0077██████████████████████████████████████████████████████| 372/372 [20:44<00:00,  3.46s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.34s/it]
-# 2024-07-07 13:50:47,614 - INFO - Epoch 8, Train Loss: 0.0073██████████████████████████████████████████████████████| 372/372 [20:43<00:00,  3.37s/it]
-# 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 8/8 [2:45:33<00:00, 1241.74s/it]
-# 2024-07-07 13:50:47,614 - INFO - Saving model...
-# 2024-07-07 13:50:47,915 - INFO - Training complete.
+
+'''
+trainer_interface.cc(687) LOG(INFO) Saving model: sentencepiece_en.model
+trainer_interface.cc(699) LOG(INFO) Saving vocabs: sentencepiece_en.vocab
+2024-07-08 00:32:09,024 - INFO - Creating Dataloader...
+Let's use 4 GPUs!
+2024-07-08 00:32:25,346 - INFO - Starting training loop...
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [39:00<00:00,  4.20s/it]
+2024-07-08 01:11:25,401 - INFO - Epoch 1, Train Loss: 0.0123█████████████████████████████████████████████████| 557/557 [38:59<00:00,  3.42s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:07<00:00,  4.11s/it]
+2024-07-08 01:49:33,214 - INFO - Epoch 2, Train Loss: 0.0103█████████████████████████████████████████████████| 557/557 [38:07<00:00,  3.35s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:19<00:00,  4.13s/it]
+2024-07-08 02:27:53,060 - INFO - Epoch 3, Train Loss: 0.0095█████████████████████████████████████████████████| 557/557 [38:19<00:00,  4.17s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:13<00:00,  4.12s/it]
+2024-07-08 03:06:06,138 - INFO - Epoch 4, Train Loss: 0.0090█████████████████████████████████████████████████| 557/557 [38:12<00:00,  3.50s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:12<00:00,  4.11s/it]
+2024-07-08 03:44:18,173 - INFO - Epoch 5, Train Loss: 0.0085█████████████████████████████████████████████████| 557/557 [38:11<00:00,  3.54s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:21<00:00,  4.13s/it]
+2024-07-08 04:22:39,995 - INFO - Epoch 6, Train Loss: 0.0082█████████████████████████████████████████████████| 557/557 [38:21<00:00,  4.98s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:09<00:00,  4.11s/it]
+2024-07-08 05:00:49,903 - INFO - Epoch 7, Train Loss: 0.0078█████████████████████████████████████████████████| 557/557 [38:09<00:00,  3.72s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:19<00:00,  4.13s/it]
+2024-07-08 05:39:09,604 - INFO - Epoch 8, Train Loss: 0.0075█████████████████████████████████████████████████| 557/557 [38:19<00:00,  3.86s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:15<00:00,  4.12s/it]
+2024-07-08 06:17:25,440 - INFO - Epoch 9, Train Loss: 0.0073█████████████████████████████████████████████████| 557/557 [38:15<00:00,  3.59s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 557/557 [38:10<00:00,  4.11s/it]
+2024-07-08 06:55:36,318 - INFO - Epoch 10, Train Loss: 0.0070████████████████████████████████████████████████| 557/557 [38:10<00:00,  3.78s/it]
+100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 10/10 [6:23:10<00:00, 2299.10s/it]
+2024-07-08 06:55:36,319 - INFO - Saving model...
+2024-07-08 06:55:36,847 - INFO - Training complete.
+'''

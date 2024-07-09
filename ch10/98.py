@@ -89,7 +89,7 @@ class DataLoaderCreater:
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, self.vocab_tgt_stoi, self.tgt_tokenizer)) for en_data in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=256, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=512, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
 
@@ -202,6 +202,7 @@ if __name__ == "__main__":
     PAD_IDX = 1
     JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
     EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
+    JESC_TRAIN_FILE_PATH = "./split/test"
 
     logger.info("Loading tokenizers...")
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
@@ -215,7 +216,19 @@ if __name__ == "__main__":
     with open(EN_TRAIN_FILE_PATH, "r", encoding="utf-8")as f:
         train_en_list = f.readlines()
         train_en_list = [en.strip("\n") for en in train_en_list]
+
+    #JESCのデータをロードし、英語と日本語に分割
+    with open( JESC_TRAIN_FILE_PATH, "r", encoding="utf-8") as f:
+        data = f.readlines()
+        data_list = [row.strip("\n").split("\t") for row in data]
+    JESC_en_data = [data[0] for data in data_list]
+    JESC_jp_data = [data[1] for data in data_list]
     
+    #新しい訓練データを作成。既存+JESC
+    train_jp_list = train_jp_list + JESC_jp_data
+    train_en_list = train_en_list + JESC_en_data
+    
+        
     logger.info("Creating dataloader...")
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
     train_dataloader = dataloader_creater.create_dataloader(jp_list=train_jp_list, en_list=train_en_list, collate_fn=collate_fn)
@@ -230,17 +243,17 @@ if __name__ == "__main__":
 
     # モデルの初期化
     logger.info("Initializing model...")
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
-    # if torch.cuda.device_count() > 1:
-    #     print("Let's use", torch.cuda.device_count(), "GPUs!")
-    #     model = nn.DataParallel(model)
+    if torch.cuda.device_count() > 1:
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        model = nn.DataParallel(model, device_ids = [0,1,3])
     model.to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     optimizer = optim.Adam(model.parameters(), lr=lr_rate)
 
     # トレーニングループ
-    num_epochs = 100
+    num_epochs = 10
     
     model.train()
     logger.info("Starting training loop...")
@@ -249,5 +262,5 @@ if __name__ == "__main__":
         logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
 
     logger.info("Saving model...")
-    torch.save(model.state_dict(),'98_model_weight.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
+    torch.save(model.module.state_dict(),'98_model_weight.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
     logger.info("Training complete.")
