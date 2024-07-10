@@ -183,12 +183,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         targets = targets.reshape(-1)
         # output = output.permute(0, 2, 1) #(バッチサイズ、　シークエンス長、　vocab_size) => (バッチサイズ、　vocab_size、　シークエンス長)にする
         loss = criterion(output, targets)
-        
-        mask = (targets != PAD_IDX).float()
-
-        # マスクを適用してロスを再計算
-        loss = loss * mask
-        loss = loss.sum() / mask.sum()
 
         optimizer.zero_grad()
         loss.backward()
@@ -202,7 +196,7 @@ if __name__ == "__main__":
     PAD_IDX = 1
     JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
     EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
-    JESC_TRAIN_FILE_PATH = "./split/test"
+    JESC_TRAIN_FILE_PATH = "./split/train"
 
     logger.info("Loading tokenizers...")
     tokenizer_src = get_tokenizer('spacy', language='ja_core_news_sm')
@@ -225,8 +219,8 @@ if __name__ == "__main__":
     JESC_jp_data = [data[1] for data in data_list]
     
     #新しい訓練データを作成。既存+JESC
-    train_jp_list = train_jp_list + JESC_jp_data
-    train_en_list = train_en_list + JESC_en_data
+    train_jp_list = train_jp_list + JESC_jp_data[::25] #約10万件抽出
+    train_en_list = train_en_list + JESC_en_data[::25]
     
         
     logger.info("Creating dataloader...")
@@ -247,7 +241,7 @@ if __name__ == "__main__":
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
     if torch.cuda.device_count() > 1:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
-        model = nn.DataParallel(model, device_ids = [0,1,3])
+        model = nn.DataParallel(model)
     model.to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     optimizer = optim.Adam(model.parameters(), lr=lr_rate)
