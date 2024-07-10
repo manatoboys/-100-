@@ -14,6 +14,10 @@ import optuna
 from sacrebleu.metrics import BLEU
 from heapq import heappush, heappop
 
+import os
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
 
@@ -98,7 +102,6 @@ class DataLoaderCreater:
         self.vocab_size_src = len(self.vocab_src_stoi)
         self.vocab_size_tgt = len(self.vocab_tgt_stoi)
 
-        #修正箇所　系列庁制限なくした
         jp_en_list = [[jp,en] for jp, en in zip(jp_list, en_list) if len(jp)<100 and len(en)<100] #系列長が100未満のものだけを訓練に使用する
         jp_list = [data[0] for data in jp_en_list]
         en_list = [data[1] for data in jp_en_list]
@@ -221,9 +224,9 @@ class BeamSearchNode(object):
 def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, max_dec_steps, device):
     model.eval()
     src = src.to(device)
-    memory = model.embedding_src(src)
-    memory = model.pos_encoding(memory)
-    memory = model.transformer.encoder(memory)
+    memory = model.module.embedding_src(src)
+    memory = model.module.pos_encoding(memory)
+    memory = model.module.transformer.encoder(memory)
 
     batch_size = src.size(0)
     n_best_list = [[] for _ in range(batch_size)]
@@ -252,10 +255,10 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
                     else:
                         continue
 
-                tgt_emb = model.embedding_tgt(decoder_input)
-                tgt_emb = model.pos_encoding(tgt_emb)
-                decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
-                logits = model.fc_out(decoder_output[:, -1, :])
+                tgt_emb = model.module.embedding_tgt(decoder_input)
+                tgt_emb = model.module.pos_encoding(tgt_emb)
+                decoder_output = model.module.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
+                logits = model.module.fc_out(decoder_output[:, -1, :])
                 log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
                 topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
@@ -388,6 +391,7 @@ def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_t
     with torch.no_grad():
         model.eval()
         model.to(device)
+        print(index_list)
         if index_list[0]==bos_token:
             index_list = index_list[1:]
         if index_list[-1]==eos_token:
@@ -427,7 +431,8 @@ with open(EN_DEV_FILE_PATH, "r", encoding="utf-8")as f:
 
 def objective(trial):
     embedding_dim = trial.suggest_categorical('embedding_dim', [128, 256, 512])
-    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256, 512])
+    batch_size = trial.suggest_categorical('batch_size', [128, 256, 512])
+    beam_width = trial.suggest_categorical('beam_width', [5,10,20])
     lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt, batch_size)
     train_dataloader = dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
@@ -441,17 +446,18 @@ def objective(trial):
     dev_dataloader = dev_dataloader_creater.create_dataloader(dev_jp_list, dev_en_list, src_stoi, tgt_stoi, collate_fn=test_collate_fn) #create_dataloaderを実行することで語彙が作成される
     en_list = dev_dataloader_creater.en_list
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads=4, num_layers=4)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device =torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     if torch.cuda.device_count() > 1:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
-        model = nn.DataParallel(model)
+        model = nn.DataParallel(model,device_ids=[1,2,3,4,5,6])
     model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model.train()
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     # 学習ループ
     for i in range(EPOCH):
         train_epoch(model, train_dataloader, criterion, optimizer, device)
+        torch.cuda.empty_cache()
     bleu = BLEU()
     all_predicted = []
     predicted_text_list = []
@@ -459,7 +465,7 @@ def objective(trial):
     index_list =[]
     model.eval()
     for src, tgt, index in tqdm(dev_dataloader):
-        output_sequences = beam_search_decoding(model, src, beam_width=5, n_best=1, bos_token=2, eos_token=3, max_dec_steps=100, device=device)
+        output_sequences = beam_search_decoding(model, src, beam_width=beam_width, n_best=1, sos_token=2, eos_token=3, max_dec_steps=100, device=device)
         predicted_list = [data[0] for data in output_sequences]
         all_predicted += predicted_list
         index_list += index
@@ -479,6 +485,7 @@ if __name__ == "__main__":
     PAD_IDX = 1
     # Optunaの最適化
     study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials= 10)
+    study.optimize(objective, n_trials= 5)
 
-    logger.info(study.best_params)
+    logger.info(f"study.best_params: {study.best_params}")
+    logger.info(f"Best score: {study.best_value}")
