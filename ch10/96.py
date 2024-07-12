@@ -11,6 +11,8 @@ import torch.optim as optim
 import os
 import logging
 from torch.utils.tensorboard import SummaryWriter
+from sacrebleu.metrics import BLEU
+from heapq import heappush, heappop
 
 logger = logging.getLogger("ログ")
 logger.setLevel(logging.DEBUG)
@@ -18,7 +20,6 @@ logger.setLevel(logging.DEBUG)
 # コンソールハンドラの作成と設定
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
-
 # フォーマットの設定
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
@@ -39,6 +40,19 @@ class datasets(Dataset):
         jp = self.jp_datas[index]
         en = self.en_datas[index]
         return jp,en
+
+class Test_datasets(Dataset):
+    def __init__(self, text, label):
+        self.jp_datas = text
+        self.en_datas = label
+
+    def __len__(self):
+        return len(self.jp_datas)
+
+    def __getitem__(self, index):
+        jp = self.jp_datas[index]
+        en = self.en_datas[index]
+        return jp,en,index
 
 class DataLoaderCreater:
 
@@ -90,7 +104,7 @@ class DataLoaderCreater:
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, self.vocab_tgt_stoi, self.tgt_tokenizer)) for en_data in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=256, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=512, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
         return dataloader
     
@@ -114,7 +128,7 @@ class Test_DataLoaderCreater:
         self.en_list = [data[1] for data in jp_en_list]
         src_data = [torch.tensor(self.convert_text_to_indexes_src(jp_data, src_stoi, self.src_tokenizer)) for jp_data in self.jp_list]
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, tgt_stoi, self.tgt_tokenizer)) for en_data in self.en_list]
-        dataset = datasets(src_data, tgt_data)
+        dataset = Test_datasets(src_data, tgt_data)
 
         dataloader = DataLoader(dataset, batch_size=100, collate_fn=collate_fn, num_workers = 16, shuffle=True)
 
@@ -126,6 +140,13 @@ def collate_fn(batch):
     src_batch = pad_sequence(src_batch, padding_value=PAD_IDX,  batch_first=True)
     tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX, batch_first=True)
     return src_batch, tgt_batch
+
+def test_collate_fn(batch):
+    src_batch, tgt_batch, batch_index = zip(*batch)
+
+    src_batch = pad_sequence(src_batch, padding_value=PAD_IDX,  batch_first=True)
+    tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX, batch_first=True)
+    return src_batch, tgt_batch, batch_index
 
 class PositionalEncoding(nn.Module):
     def __init__(self, embedding_dim):
@@ -224,6 +245,124 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         torch.cuda.empty_cache()
     return epoch_loss/len(dataloader.dataset)
 
+class BeamSearchNode(object):
+    def __init__(self, wid, logp, length):
+        self.wid = wid
+        self.logp = logp
+        self.length = length
+
+    def eval(self):
+        #正則化項を導入することで長い文章を生成しやすくしている。
+        return self.logp / float(self.length - 1 + 1e-6)
+
+def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, max_dec_steps, device):
+    model.eval()
+    src = src.to(device)
+    memory = model.module.embedding_src(src)
+    memory = model.module.pos_encoding(memory)
+    memory = model.module.transformer.encoder(memory)
+
+    batch_size = src.size(0)
+    n_best_list = [[] for _ in range(batch_size)]
+
+    for batch_id in range(batch_size):
+        end_nodes = []
+        decoder_input = torch.tensor([[sos_token]]).to(device)
+        node = BeamSearchNode(wid=[sos_token], logp=0, length=1)
+        nodes = []
+        heappush(nodes, (-node.eval(), id(node), node))
+        n_dec_steps = 0
+
+        while True:
+            if n_dec_steps > max_dec_steps:
+                break
+
+            temp_nodes = []
+            for _ in range(min(len(nodes), beam_width)):
+                score, _, n = heappop(nodes)
+                decoder_input = torch.tensor([n.wid]).to(device)
+
+                if n.wid[-1] == eos_token and len(n.wid) > 1:
+                    end_nodes.append((score, id(n), n))
+                    if len(end_nodes) >= n_best:
+                        break
+                    else:
+                        continue
+
+                tgt_emb = model.module.embedding_tgt(decoder_input)
+                tgt_emb = model.module.pos_encoding(tgt_emb)
+                decoder_output = model.module.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
+                logits = model.module.fc_out(decoder_output[:, -1, :])
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+                topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
+
+                for new_k in range(beam_width):
+                    decoded_t = topk_indexes[0][new_k].item()
+                    logp = topk_log_prob[0][new_k].item()
+                    new_wid = n.wid + [decoded_t]
+                    new_node = BeamSearchNode(wid=new_wid, logp=n.logp + logp, length=n.length + 1)
+                    heappush(temp_nodes, (-new_node.eval(), id(new_node), new_node))
+
+            nodes = temp_nodes
+            n_dec_steps += 1
+
+            if len(end_nodes) >= beam_width:
+                break
+
+        if len(end_nodes) == 0:
+            end_nodes = [heappop(nodes) for _ in range(beam_width)]
+
+        n_best_seq_list = []
+
+        #一番確率が高いやつを抽出
+        for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
+            sequence = n.wid
+            if sequence[0] == sos_token:
+                sequence = sequence[1:]
+            if sequence[-1] == eos_token:
+                sequence = sequence[:-1]
+            n_best_seq_list.append(sequence)
+            if len(n_best_seq_list) >= n_best:
+                break
+
+        n_best_list[batch_id] = n_best_seq_list
+
+    return n_best_list
+
+def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_token=3):
+    with torch.no_grad():
+        model.eval()
+        model.to(device)
+        if index_list[0]==bos_token:
+            index_list = index_list[1:]
+        if index_list[-1]==eos_token:
+            index_list = index_list[:-1]
+        #.や,の前に空白がある場合は空白を削除する
+        english_text = " ".join([tgt_itos[en] for en in index_list]).replace(' .', '.').replace(' ,', ',').replace(" ' ", "'").replace(" n't", "n't").replace(" 'm", "'m").replace(" 're", "'re").replace(" 've", "'ve").replace(" 'll", "'ll").replace(" 's", "'s")
+    return english_text
+
+def caluculate_bleu(model, test_dataloader, tgt_itos, device):
+    all_predicted = []
+    predicted_text_list = []
+    refs = []
+    index_list =[]
+    for src, tgt, index in dev_dataloader:
+        output_sequences = beam_search_decoding(model, src, beam_width=10, n_best=1, sos_token=2, eos_token=3, max_dec_steps=10, device=device)
+        predicted_list = [data[0] for data in output_sequences]
+        all_predicted += predicted_list
+        index_list += index
+        break #100個のデータでBLEUスコアを測定
+    for en_index in all_predicted:
+        predicted_text = translate_from_index(model, en_index, tgt_itos, device)
+        predicted_text_list.append(predicted_text)
+    for i in index_list:
+        refs.append(en_list[i])
+    
+    bleu = BLEU()
+    score = bleu.corpus_score(predicted_text_list, [refs])
+    return score.score
+
 
 if __name__ == "__main__":
     PAD_IDX = 1
@@ -246,8 +385,16 @@ if __name__ == "__main__":
     logger.info("Creating dataloader...")
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt)
     train_dataloader = dataloader_creater.create_dataloader(jp_list=train_jp_list, en_list=train_en_list, collate_fn=collate_fn)
+    tgt_itos = dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
+    tgt_stoi = dataloader_creater.vocab_tgt_stoi
+    src_stoi = dataloader_creater.vocab_src_stoi
     vocab_size_src = dataloader_creater.vocab_size_src
     vocab_size_tgt = dataloader_creater.vocab_size_tgt
+    
+    dev_dataloader_creater = Test_DataLoaderCreater(tokenizer_src, tokenizer_tgt)
+    dev_dataloader = dev_dataloader_creater.create_dataloader(train_jp_list, train_en_list, src_stoi, tgt_stoi, collate_fn=test_collate_fn) #create_dataloaderを実行することで語彙が作成される
+    jp_list = dev_dataloader_creater.jp_list
+    en_list = dev_dataloader_creater.en_list
     
     # モデルのハイパーパラメータ
     embedding_dim = 512
@@ -257,11 +404,11 @@ if __name__ == "__main__":
 
     # モデルの初期化
     logger.info("Initializing model...")
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads, num_layers)
-    # if torch.cuda.device_count() > 1:
-    #     print("Let's use", torch.cuda.device_count(), "GPUs!")
-    #     model = nn.DataParallel(model)
+    if torch.cuda.device_count() > 1:
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        model = nn.DataParallel(model)
     model.to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
     optimizer = optim.Adam(model.parameters(), lr=lr_rate)
@@ -270,12 +417,12 @@ if __name__ == "__main__":
     num_epochs = 10
     
     model.train()
+    writer = SummaryWriter(log_dir="runs/96")
     logger.info("Starting training loop...")
     for epoch in tqdm(range(num_epochs)):
         train_loss = train_epoch(model, train_dataloader, criterion, optimizer, device)
-        logger.info(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}')
-
-    logger.info("Saving model...")
-    torch.save(model.state_dict(),'model_weight_4.pth') #nn.Dataparallelを使用した場合はmodel.state_dictではなくmodel.module.state_dictと書かなければいけない
-    logger.info("Training complete.")
+        score = caluculate_bleu(model, dev_dataloader, tgt_itos, device )
+         #TensorBoardに記録
+        writer.add_scalar('Loss/train', train_loss, epoch)
+        writer.add_scalar('BLEU/train', score, epoch)
 

@@ -390,21 +390,27 @@ if __name__ == "__main__":
         predicted_text_list = []
         refs = []
         index_list =[]
-        for src, tgt, index in tqdm(dev_dataloader):
+        for src, tgt, index in dev_dataloader:
             output_sequences = beam_search_decoding(model, src, beam_width, n_best, bos_token, eos_token, max_dec_steps, device)
             predicted_list = [data[0] for data in output_sequences]
             all_predicted += predicted_list
             index_list += index
-            break
+            break #200個のデータでBLEUスコアを測定
         for en_index in all_predicted:
             predicted_text = translate_from_index(model, en_index, tgt_itos, device)
             predicted_text_list.append(predicted_text)
         refs = []
         for i in index_list:
             refs.append(en_list[i])
-        max_index = max(index_list)
         
         bleu = BLEU()
         score = bleu.corpus_score(predicted_text_list, [refs])
         scores.append(score.score)
         print(f"beam_width:{beam_width}, score:{score}")
+        
+        '''
+        beam_width:1, score:BLEU = 7.09 40.7/14.3/6.6/2.8 (BP = 0.693 ratio = 0.732 hyp_len = 609 ref_len = 832)
+        beam_width:5, score:BLEU = 9.70 42.6/16.0/9.1/5.2 (BP = 0.722 ratio = 0.754 hyp_len = 605 ref_len = 802)
+        beam_width:10, score:BLEU = 10.35 45.0/17.3/9.3/5.5 (BP = 0.733 ratio = 0.763 hyp_len = 649 ref_len = 851)
+        beam_width:20, score:BLEU = 9.01 41.4/16.5/8.5/4.2 (BP = 0.721 ratio = 0.753 hyp_len = 596 ref_len = 791)
+        '''
