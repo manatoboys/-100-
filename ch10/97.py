@@ -109,7 +109,7 @@ class DataLoaderCreater:
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, self.vocab_tgt_stoi, self.tgt_tokenizer)) for en_data in en_list]
         dataset = datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, collate_fn=collate_fn, num_workers = 2, shuffle=True)
         return dataloader
 
 class Test_DataLoaderCreater:
@@ -134,7 +134,7 @@ class Test_DataLoaderCreater:
         tgt_data = [torch.tensor(self.convert_text_to_indexes_tgt(en_data, tgt_stoi, self.tgt_tokenizer)) for en_data in self.en_list]
         dataset = Test_datasets(src_data, tgt_data)
 
-        dataloader = DataLoader(dataset, batch_size=100, collate_fn=collate_fn, num_workers = 16, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=50, collate_fn=collate_fn, num_workers = 2, shuffle=True)
 
         return dataloader
 
@@ -217,7 +217,6 @@ class BeamSearchNode(object):
         self.length = length
 
     def eval(self):
-        #正則化項を導入することで長い文章を生成しやすくしている。
         return self.logp / float(self.length - 1 + 1e-6)
 
 
@@ -250,7 +249,7 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
 
                 if n.wid[-1] == eos_token and len(n.wid) > 1:
                     end_nodes.append((score, id(n), n))
-                    if len(end_nodes) >= n_best:
+                    if len(end_nodes) >= beam_width:
                         break
                     else:
                         continue
@@ -296,72 +295,6 @@ def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, m
 
     return n_best_list
 
-# def beam_search_decoding(model, src, beam_width, n_best, sos_token, eos_token, max_dec_steps, device):
-#     model.eval()
-#     src = src.to(device)
-#     memory = model.embedding_src(src)
-#     memory = model.pos_encoding(memory)
-#     memory = model.transformer.encoder(memory)
-    
-#     batch_size = src.size(0)
-#     n_best_list = [[] for _ in range(batch_size)]
-#     for batch_id in range(batch_size):
-#         end_nodes = []
-#         decoder_input = torch.tensor([[sos_token]]).to(device)
-#         node = BeamSearchNode(wid=[sos_token], logp=0, length=1)
-#         nodes = []
-#         heappush(nodes, (-node.eval(), id(node), node))
-#         n_dec_steps = 0
-
-#         while True:
-#             if n_dec_steps > max_dec_steps:
-#                 break
-
-#             score, _, n = heappop(nodes)
-#             decoder_input = torch.tensor([n.wid]).to(device)
-
-#             if n.wid[-1] == eos_token and len(n.wid) > 1:
-#                 end_nodes.append((score, id(n), n))
-#                 if len(end_nodes) >= beam_width:
-#                     break
-#                 else:
-#                     continue
-
-#             tgt_emb = model.embedding_tgt(decoder_input)
-#             tgt_emb = model.pos_encoding(tgt_emb)
-#             decoder_output = model.transformer.decoder(tgt_emb, memory[batch_id:batch_id+1])
-#             logits = model.fc_out(decoder_output[:, -1, :])
-#             log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
-#             topk_log_prob, topk_indexes = torch.topk(log_probs, beam_width)
-
-#             for new_k in range(beam_width):
-#                 decoded_t = topk_indexes[0][new_k].item()
-#                 logp = topk_log_prob[0][new_k].item()
-#                 new_wid = n.wid + [decoded_t]
-#                 node = BeamSearchNode(wid=new_wid, logp=n.logp + logp, length=n.length + 1)
-#                 heappush(nodes, (-node.eval(), id(node), node))
-
-#             n_dec_steps += 1
-
-#         if len(end_nodes) == 0:
-#             end_nodes = [heappop(nodes) for _ in range(beam_width)]
-
-#         n_best_seq_list = []
-#         for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
-#             sequence = n.wid
-#             if sequence[0] == sos_token:
-#                 sequence = sequence[1:]
-#             if sequence[-1] == eos_token:
-#                 sequence = sequence[:-1]
-#             n_best_seq_list.append(sequence)
-#             if len(n_best_seq_list) >= n_best:
-#                 break
-
-#         n_best_list[batch_id] = n_best_seq_list
-
-#     return n_best_list
-
 def train_epoch(model, dataloader, criterion, optimizer, device):
     epoch_loss = 0
     for batch_idx, (src, tgt) in enumerate(tqdm(dataloader)):
@@ -387,11 +320,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         torch.cuda.empty_cache()
     return epoch_loss/len(dataloader.dataset)
 
-def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_token=3):
+def translate_from_index(index_list, tgt_itos, bos_token=2, eos_token=3):
     with torch.no_grad():
-        model.eval()
-        model.to(device)
-        print(index_list)
         if index_list[0]==bos_token:
             index_list = index_list[1:]
         if index_list[-1]==eos_token:
@@ -400,7 +330,7 @@ def translate_from_index(model, index_list, tgt_itos, device, bos_token=2, eos_t
         english_text = " ".join([tgt_itos[en] for en in index_list]).replace(' .', '.').replace(' ,', ',').replace(" ' ", "'").replace(" n't", "n't").replace(" 'm", "'m").replace(" 're", "'re").replace(" 've", "'ve").replace(" 'll", "'ll").replace(" 's", "'s")
     return english_text
 
-EPOCH=8
+EPOCH=6
 
 JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
 EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
@@ -430,10 +360,11 @@ with open(EN_DEV_FILE_PATH, "r", encoding="utf-8")as f:
     dev_en_list = [en.strip("\n") for en in dev_en_list]
 
 def objective(trial):
-    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 256, 512])
-    batch_size = trial.suggest_categorical('batch_size', [128, 256, 512])
+    embedding_dim = trial.suggest_categorical('embedding_dim', [256, 512])
+    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256])
     beam_width = trial.suggest_categorical('beam_width', [5,10,20])
     lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
+    logger.info("Creating DataLoader...")
     dataloader_creater = DataLoaderCreater(tokenizer_src, tokenizer_tgt, batch_size)
     train_dataloader = dataloader_creater.create_dataloader(train_jp_list, train_en_list, collate_fn=collate_fn) #create_dataloaderを実行することで語彙が作成される
     tgt_itos = dataloader_creater.vocab_tgt_itos #出力結果をindex→英文に変換
@@ -446,10 +377,10 @@ def objective(trial):
     dev_dataloader = dev_dataloader_creater.create_dataloader(dev_jp_list, dev_en_list, src_stoi, tgt_stoi, collate_fn=test_collate_fn) #create_dataloaderを実行することで語彙が作成される
     en_list = dev_dataloader_creater.en_list
     model = TransformerModel(vocab_size_src, vocab_size_tgt, embedding_dim, num_heads=4, num_layers=4)
-    device =torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device =torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if torch.cuda.device_count() > 1:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
-        model = nn.DataParallel(model,device_ids=[1,2,3,4,5,6])
+        model = nn.DataParallel(model)
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model.train()
@@ -464,13 +395,16 @@ def objective(trial):
     refs = []
     index_list =[]
     model.eval()
-    for src, tgt, index in tqdm(dev_dataloader):
+    logger.info("beamsearch")
+    for src, tgt, index in dev_dataloader:
         output_sequences = beam_search_decoding(model, src, beam_width=beam_width, n_best=1, sos_token=2, eos_token=3, max_dec_steps=100, device=device)
         predicted_list = [data[0] for data in output_sequences]
         all_predicted += predicted_list
         index_list += index
+        break
+    logger.info("translate_from_index")
     for en_index in all_predicted:
-        predicted_text = translate_from_index(model, en_index, tgt_itos, device)
+        predicted_text = translate_from_index(en_index, tgt_itos)
         predicted_text_list.append(predicted_text)
     refs = []
     for i in index_list:
@@ -478,7 +412,8 @@ def objective(trial):
 
     bleu = BLEU()
     score = bleu.corpus_score(predicted_text_list, [refs])
-    return score
+    torch.cuda.empty_cache()
+    return score.score
 
 
 if __name__ == "__main__":
