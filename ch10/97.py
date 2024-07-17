@@ -330,7 +330,7 @@ def translate_from_index(index_list, tgt_itos, bos_token=2, eos_token=3):
         english_text = " ".join([tgt_itos[en] for en in index_list]).replace(' .', '.').replace(' ,', ',').replace(" ' ", "'").replace(" n't", "n't").replace(" 'm", "'m").replace(" 're", "'re").replace(" 've", "'ve").replace(" 'll", "'ll").replace(" 's", "'s")
     return english_text
 
-EPOCH=6
+EPOCH=5
 
 JP_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.ja"
 EN_TRAIN_FILE_PATH = "./kftt-data-1.0/data/orig/kyoto-train.en"
@@ -361,7 +361,7 @@ with open(EN_DEV_FILE_PATH, "r", encoding="utf-8")as f:
 
 def objective(trial):
     embedding_dim = trial.suggest_categorical('embedding_dim', [256, 512])
-    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256])
+    batch_size = trial.suggest_categorical('batch_size', [128, 256])
     beam_width = trial.suggest_categorical('beam_width', [5,10,20])
     lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
     logger.info("Creating DataLoader...")
